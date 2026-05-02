@@ -1,0 +1,49 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: SampleRecord
+type: object
+required: [sample_id, policy_version, prompt, response, tokens, logprobs, reward]
+properties:
+  sample_id: { type: string }
+  request_id: { type: string }
+  policy_version: { type: integer, minimum: 0 }
+  policy_version_max: { type: integer, minimum: 0 }
+  policy_segments:
+    type: array
+    items:
+      type: object
+      required: [version_id, start_token, end_token]
+      properties:
+        version_id: { type: integer, minimum: 0 }
+        start_token: { type: integer, minimum: 0 }
+        end_token: { type: integer, minimum: 0 }
+        weight_checksum: { type: string }
+  weight_checksum: { type: string }
+  prompt: { type: string }
+  response: { type: string }
+  finish_reason: { type: string }
+  created_at: { type: string, format: date-time }
+  expires_at: { type: string, format: date-time }
+  prompt_tokens: { type: integer, minimum: 0 }
+  response_tokens: { type: integer, minimum: 0 }
+  tokens:
+    type: array
+    items: { type: integer }
+  logprobs:
+    type: array
+    items: { type: number }
+  old_logprobs:
+    type: array
+    items: { type: number }
+  partial_rollout: { type: boolean }
+  reward: { type: number }
+  reward_source: { type: string }
+  advantages:
+    type: array
+    items: { type: number }
+  drop_reason: { type: string }
+  meta:
+    type: object
+    properties:
+      worker_id: { type: string }
+      latency_ms: { type: integer, minimum: 0 }
+      precision_tag: { type: string }

@@ -1,0 +1,110 @@
+run:
+  intent: train
+  emit_resolved_config: true
+
+runtime:
+  backend: ray
+  local:
+    num_gpus: 8
+    cpus: 64
+  storage:
+    allowed_input_sources: [hdfs_uri, hdfs_fuse_path]
+    hdfs:
+      cli: hdfs
+      read_probe_timeout_sec: 30
+    hdfs_fuse:
+      mount_root: /mnt/hdfs
+      require_mount: true
+      read_probe_timeout_sec: 10
+  ray:
+    address: auto
+    namespace: nano-rl
+    gpu_manager:
+      enabled: true
+      actor_per_gpu: true
+      slots:
+        rollout_only: 4
+        hybrid: 4
+        idle: 0
+      hybrid_toggle:
+        strategy: swap_on_toggle
+        rollout_drain_timeout_sec: 60
+        train_drain_timeout_sec: 60
+        cuda_quiesce_timeout_sec: 30
+        offload:
+          trainer_model: cpu_pinned
+          trainer_optimizer: cpu_pinned
+          rollout_engine: vllm_sleep
+          vllm_sleep_level: 2
+          cpu_memory_budget_gb: 512
+          residual_gpu_memory_budget_mb: 2048
+    placement:
+      trainer:
+        num_ranks: 4
+        gpus_per_rank: 1
+        cpus_per_rank: 8
+      rollout:
+        num_actors: 8
+        gpus_per_actor: 1
+        tensor_parallel_size: 1
+      reward:
+        num_actors: 2
+        cpus_per_actor: 4
+
+mode: disaggregated
+
+parallel:
+  trainer:
+    data_parallel_size: 4
+    fsdp_world_size: 4
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+  rollout:
+    data_parallel_size: 8
+    tensor_parallel_size: 1
+
+model:
+  source_type: hdfs_fuse_path
+  model_uri: /mnt/hdfs/models/qwen
+  tokenizer_uri: /mnt/hdfs/models/qwen
+
+data:
+  source_type: hdfs_uri
+  dataset_uri: hdfs://namenode/datasets/prompts.jsonl
+  prompt_column: prompt
+
+algorithm:
+  name: ppo
+  max_steps: 1000
+  learning_rate: 1.0e-6
+  seed: 42
+
+trainer:
+  backend: fsdp2
+  global_batch_size: 1024
+  fsdp2:
+    mixed_precision: bf16
+    sharding: full_shard
+
+rollout:
+  backend: vllm
+  partial_rollout:
+    enabled: true
+    pause_mode: keep
+    clear_cache: true
+    mixed_policy_samples: train
+  hybrid:
+    enabled: true
+    precision_mix:
+      bf16: 0.5
+      fp8: 0.5
+    policy_pin:
+      latest_ratio: 0.8
+      lagged_ratio: 0.2
+
+control:
+  max_policy_lag: 2
+  sample_ttl_sec: 300
+  queue_high_watermark: 20000
+  max_pending_rollout_refs: 128
+  max_pending_train_refs: 16

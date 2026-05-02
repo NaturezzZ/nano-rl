@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nano-rl v0.1 架构设计文档</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5f6f86;
+      --paper: #f7f9fc;
+      --panel: #ffffff;
+      --line: #d8e0ea;
+      --line-strong: #a8b7ca;
+      --blue: #2563eb;
+      --green: #059669;
+      --orange: #d97706;
+      --red: #dc2626;
+      --violet: #7c3aed;
+      --cyan: #0891b2;
+      --code: #0f172a;
+      --code-bg: #eef2f7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+
+    a {
+      color: var(--blue);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .shell {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 22px 56px;
+    }
+
+    header {
+      padding: 30px 0 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 4vw, 48px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 920px;
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .meta {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+    }
+
+    .meta b {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .meta span {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    nav.toc {
+      margin: 22px 0 26px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    nav.toc a {
+      display: inline-block;
+      margin: 4px 14px 4px 0;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    section {
+      margin-top: 24px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 25px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 22px 0 10px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 10px 0;
+    }
+
+    ul,
+    ol {
+      margin: 10px 0 0 20px;
+      padding: 0;
+    }
+
+    li + li {
+      margin-top: 5px;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: var(--code);
+      background: var(--code-bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: #eff6ff;
+      padding: 12px 14px;
+      margin: 14px 0;
+      border-radius: 0 8px 8px 0;
+    }
+
+    .callout.warn {
+      border-left-color: var(--orange);
+      background: #fff7ed;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0 2px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      background: #fafcff;
+      font-size: 13px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfdff;
+    }
+
+    .box h3 {
+      margin-top: 0;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 12px;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #eef4fb;
+      color: #20324c;
+      font-weight: 800;
+    }
+
+    tr:nth-child(even) td {
+      background: #fbfdff;
+    }
+
+    .diagram {
+      width: 100%;
+      margin: 12px 0 4px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      min-width: 940px;
+      height: auto;
+      font-family: inherit;
+    }
+
+    .svg-title {
+      font-weight: 800;
+      font-size: 17px;
+      fill: var(--ink);
+    }
+
+    .svg-sub {
+      font-size: 12px;
+      fill: var(--muted);
+    }
+
+    .svg-label {
+      font-size: 13px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+
+    .svg-small {
+      font-size: 11px;
+      fill: var(--muted);
+    }
+
+    .svg-box {
+      fill: #ffffff;
+      stroke: var(--line-strong);
+      stroke-width: 1.5;
+      rx: 8;
+    }
+
+    .svg-blue {
+      fill: #eff6ff;
+      stroke: #93c5fd;
+    }
+
+    .svg-green {
+      fill: #ecfdf5;
+      stroke: #86efac;
+    }
+
+    .svg-orange {
+      fill: #fff7ed;
+      stroke: #fdba74;
+    }
+
+    .svg-violet {
+      fill: #f5f3ff;
+      stroke: #c4b5fd;
+    }
+
+    .svg-cyan {
+      fill: #ecfeff;
+      stroke: #67e8f9;
+    }
+
+    .svg-red {
+      fill: #fef2f2;
+      stroke: #fca5a5;
+    }
+
+    .legend {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .source-list {
+      columns: 2;
+      column-gap: 26px;
+    }
+
+    .source-list li {
+      break-inside: avoid;
+      margin-bottom: 6px;
+    }
+
+    @media (max-width: 780px) {
+      .shell {
+        padding: 18px 12px 42px;
+      }
+
+      section {
+        padding: 18px 14px;
+      }
+
+      .meta-grid,
+      .grid-2,
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+
+      .source-list {
+        columns: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <p class="eyebrow">nano-rl architecture living document</p>
+      <h1>nano-rl v0.1 架构设计文档</h1>
+      <p class="lead">
+        本文档基于当前设计源文件整理，目标是把 Ray-native 单机 RL runtime 的组件边界、actor 编排、
+        rollout 数据路径和权重版本路径放到一个可浏览的 HTML 中。后续改动架构时，应同步更新本文件。
+      </p>
+      <div class="meta-grid">
+        <div class="meta"><b>设计阶段</b><span>design-first / no full runtime yet</span></div>
+        <div class="meta"><b>用户入口</b><span>main.py -> YAML -> LaunchConfig</span></div>
+        <div class="meta"><b>执行层</b><span>single-machine Ray-native actors</span></div>
+        <div class="meta"><b>源同步日期</b><span>2026-05-02</span></div>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="目录">
+      <a href="#maintenance">维护契约</a>
+      <a href="#overview">架构总览</a>
+      <a href="#component-svg">组件关系图</a>
+      <a href="#rollout-svg">rollout 流程图</a>
+      <a href="#modes">运行模式</a>
+      <a href="#components">组件设计</a>
+      <a href="#actors">Ray actor 清单</a>
+      <a href="#protocols">协议与状态</a>
+      <a href="#risks">约束与风险</a>
+      <a href="#sources">事实来源</a>
+    </nav>
+
+    <section id="maintenance">
+      <h2>维护契约</h2>
+      <div class="callout">
+        <p>
+          本 HTML 是 <code>plan-design.md</code>、<code>docs/architecture/mode-fsm.md</code>、
+          <code>docs/protocols/*.yaml</code> 和 <code>docs/examples/*.yaml</code> 的浏览版索引。
+          它不是新的架构源头。后续如果修改 mode、actor、slot、schema、rollout/train 流程或示例 YAML，
+          同一个变更集中也要更新本文件。
+        </p>
+      </div>
+      <ol>
+        <li>先更新事实源：主设计写入 <code>plan-design.md</code>，状态机写入 <code>docs/architecture/mode-fsm.md</code>，协议字段写入 <code>docs/protocols/</code>。</li>
+        <li>再更新本 HTML：同步组件说明、actor 表、SVG 图和约束说明。</li>
+        <li>最后跑轻量验证：Markdown 链接保持可读，YAML schema/example 可解析，HTML 可被基本 parser 读取。</li>
+      </ol>
+      <p>
+        当前仓库仍处在设计优先阶段，因此本文描述的是规划中的 runtime contract；尚不代表已经存在完整 Python package 或可运行 actor 实现。
+      </p>
+    </section>
+
+    <section id="overview">
+      <h2>架构总览</h2>
+      <p>
+        nano-rl v0.1 的核心目标是做一个“小而全”的 RL 框架：trainer 后端目标是 PyTorch FSDP2，
+        rollout 后端目标是 vLLM，执行层固定为单机 Ray-native actor runtime。控制器拥有 loop 语义；
+        trainer、rollout、reward、queue、weight registry 和 metrics 都是可替换后端或服务边界。
+      </p>
+      <div class="pill-row">
+        <span class="pill">YAML-first</span>
+        <span class="pill">Ray-native</span>
+        <span class="pill">FSDP2 trainer</span>
+        <span class="pill">vLLM rollout</span>
+        <span class="pill">policy_version accounting</span>
+        <span class="pill">bounded staleness</span>
+        <span class="pill">single-machine v0.1</span>
+      </div>
+      <div class="grid-3">
+        <div class="box">
+          <h3>Control plane</h3>
+          <p><code>main.py</code> 读取 YAML，校验并归一化成 <code>LaunchConfig</code>。Ray Driver 初始化 runtime，创建 <code>ControllerActor</code>，由 controller 驱动模式 FSM、train window、rollout 节奏和故障恢复。</p>
+        </div>
+        <div class="box">
+          <h3>Resource plane</h3>
+          <p>每张物理 GPU 对应一个 <code>GpuSlotActor(num_gpus=1)</code>。slot mode 为 <code>rollout_only</code>、<code>hybrid</code> 或 <code>idle</code>；hybrid slot 在 rollout role 与 trainer rank role 之间显式 toggle。</p>
+        </div>
+        <div class="box">
+          <h3>Data plane</h3>
+          <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 指向 HDFS/HDFS-FUSE artifact，不把大权重放进 Ray object store。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="component-svg">
+      <h2>SVG 组件关系图</h2>
+      <p class="legend">
+        图中实线表示控制或数据调用关系，虚线表示由 <code>GpuSlotActor</code> 托管的 slot 内 role。真正申请 Ray GPU token 的只有 <code>GpuSlotActor</code>。
+      </p>
+      <div class="diagram">
+        <svg viewBox="0 0 1180 720" role="img" aria-label="nano-rl 组件关系图">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#64748b"></path>
+            </marker>
+            <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#2563eb"></path>
+            </marker>
+            <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#059669"></path>
+            </marker>
+          </defs>
+
+          <text x="28" y="36" class="svg-title">Control Plane</text>
+          <rect x="24" y="54" width="1132" height="135" class="svg-box svg-blue"></rect>
+          <rect x="48" y="84" width="160" height="64" class="svg-box"></rect>
+          <text x="68" y="111" class="svg-label">main.py</text>
+          <text x="68" y="132" class="svg-small">YAML -> LaunchConfig</text>
+
+          <rect x="262" y="84" width="180" height="64" class="svg-box"></rect>
+          <text x="284" y="111" class="svg-label">Ray Driver</text>
+          <text x="284" y="132" class="svg-small">ray.init / placement</text>
+
+          <rect x="506" y="76" width="210" height="80" class="svg-box svg-violet"></rect>
+          <text x="528" y="105" class="svg-label">ControllerActor</text>
+          <text x="528" y="126" class="svg-small">loop owner / phase scheduler</text>
+          <text x="528" y="144" class="svg-small">degrade / recovery</text>
+
+          <rect x="780" y="84" width="170" height="64" class="svg-box"></rect>
+          <text x="804" y="111" class="svg-label">Mode FSM</text>
+          <text x="804" y="132" class="svg-small">fully_sync / hybrid</text>
+
+          <rect x="1000" y="84" width="120" height="64" class="svg-box"></rect>
+          <text x="1020" y="111" class="svg-label">Metrics</text>
+          <text x="1020" y="132" class="svg-small">events / health</text>
+
+          <line x1="208" y1="116" x2="262" y2="116" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="442" y1="116" x2="506" y2="116" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="716" y1="116" x2="780" y2="116" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="716" y1="102" x2="1000" y2="102" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+
+          <text x="28" y="232" class="svg-title">Resource Plane</text>
+          <rect x="24" y="250" width="520" height="230" class="svg-box svg-orange"></rect>
+          <text x="48" y="280" class="svg-label">GpuSlotActor[gpu=i]</text>
+          <text x="48" y="302" class="svg-small">唯一持有 Ray num_gpus=1 token；负责 CUDA device、role lifecycle、active-role gate</text>
+
+          <rect x="60" y="330" width="185" height="94" class="svg-box svg-green"></rect>
+          <text x="82" y="361" class="svg-label">rollout_only slot</text>
+          <text x="82" y="384" class="svg-small">RolloutWorker active</text>
+          <text x="82" y="404" class="svg-small">不参与 FSDP2 ranks</text>
+
+          <rect x="310" y="314" width="190" height="135" class="svg-box svg-cyan"></rect>
+          <text x="334" y="342" class="svg-label">hybrid slot</text>
+          <text x="334" y="364" class="svg-small">rollout <-> train toggle</text>
+          <rect x="330" y="382" width="70" height="38" fill="#ffffff" stroke="#67e8f9" stroke-dasharray="4 4" rx="6"></rect>
+          <text x="342" y="406" class="svg-small">Rollout</text>
+          <rect x="414" y="382" width="70" height="38" fill="#ffffff" stroke="#67e8f9" stroke-dasharray="4 4" rx="6"></rect>
+          <text x="428" y="406" class="svg-small">Trainer</text>
+
+          <rect x="620" y="250" width="536" height="230" class="svg-box svg-green"></rect>
+          <text x="644" y="280" class="svg-label">Logical role groups</text>
+          <text x="644" y="302" class="svg-small">coordinator actors aggregate slot-hosted roles; groups do not own GPU tokens directly</text>
+
+          <rect x="650" y="330" width="190" height="66" class="svg-box"></rect>
+          <text x="670" y="357" class="svg-label">RolloutCoordinatorActor</text>
+          <text x="670" y="378" class="svg-small">prompt routing / in-flight / versions</text>
+
+          <rect x="906" y="330" width="190" height="66" class="svg-box"></rect>
+          <text x="926" y="357" class="svg-label">TrainerCoordinatorActor</text>
+          <text x="926" y="378" class="svg-small">train window / ranks / epoch</text>
+
+          <line x1="611" y1="156" x2="405" y2="314" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="611" y1="156" x2="745" y2="330" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="611" y1="156" x2="1000" y2="330" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="650" y1="364" x2="500" y2="382" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"></line>
+          <line x1="906" y1="364" x2="500" y2="420" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"></line>
+
+          <text x="28" y="522" class="svg-title">Data Plane</text>
+          <rect x="24" y="540" width="1132" height="142" class="svg-box"></rect>
+          <rect x="52" y="574" width="150" height="62" class="svg-box svg-green"></rect>
+          <text x="72" y="600" class="svg-label">Ray Object Store</text>
+          <text x="72" y="621" class="svg-small">sample refs</text>
+
+          <rect x="254" y="574" width="150" height="62" class="svg-box svg-cyan"></rect>
+          <text x="276" y="600" class="svg-label">SampleQueueActor</text>
+          <text x="276" y="621" class="svg-small">TTL / lag / leases</text>
+
+          <rect x="456" y="574" width="150" height="62" class="svg-box svg-orange"></rect>
+          <text x="478" y="600" class="svg-label">RewardActorPool</text>
+          <text x="478" y="621" class="svg-small">reward / postprocess</text>
+
+          <rect x="658" y="574" width="170" height="62" class="svg-box svg-violet"></rect>
+          <text x="680" y="600" class="svg-label">WeightRegistryActor</text>
+          <text x="680" y="621" class="svg-small">WeightMeta / activation</text>
+
+          <rect x="880" y="574" width="160" height="62" class="svg-box svg-blue"></rect>
+          <text x="902" y="600" class="svg-label">HDFS / FUSE</text>
+          <text x="902" y="621" class="svg-small">model / weights / data</text>
+
+          <line x1="745" y1="396" x2="530" y2="574" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"></line>
+          <line x1="530" y1="574" x2="404" y2="604" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="404" y1="604" x2="254" y2="604" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="254" y1="604" x2="202" y2="604" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="996" y1="396" x2="404" y2="604" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"></line>
+          <line x1="996" y1="396" x2="658" y2="604" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"></line>
+          <line x1="828" y1="604" x2="880" y2="604" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+          <line x1="880" y1="616" x2="828" y2="616" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
+        </svg>
+      </div>
+    </section>
+
+    <section id="rollout-svg">
+      <h2>SVG rollout 全流程图</h2>
+      <p>
+        下面把一次 rollout 从 prompt 分发到样本入队、训练消费、权重发布和全局激活串起来。<code>fully_sync</code> 下所有 GPU 都是 hybrid，
+        每轮 rollout 后整体切 train；<code>standalone_hybrid</code> 下只 drain hybrid slots，<code>rollout_only</code> slots 在背压与 policy lag guard 下继续生成。
+      </p>
+      <div class="diagram">
+        <svg viewBox="0 0 1180 880" role="img" aria-label="rollout 过程流程图">
+          <defs>
+            <marker id="flow-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#475569"></path>
+            </marker>
+          </defs>
+
+          <text x="40" y="42" class="svg-title">Rollout steady path</text>
+          <rect x="38" y="64" width="214" height="72" class="svg-box svg-blue"></rect>
+          <text x="62" y="92" class="svg-label">1. Controller phase</text>
+          <text x="62" y="114" class="svg-small">检查 queue 水位、FSM、latest healthy weight</text>
+
+          <rect x="320" y="64" width="214" height="72" class="svg-box svg-green"></rect>
+          <text x="344" y="92" class="svg-label">2. 选择 prompt/version</text>
+          <text x="344" y="114" class="svg-small">RolloutCoordinator 绑定 target_policy_version</text>
+
+          <rect x="602" y="64" width="214" height="72" class="svg-box svg-orange"></rect>
+          <text x="626" y="92" class="svg-label">3. active-role gate</text>
+          <text x="626" y="114" class="svg-small">GpuSlotActor 确认 ROLLOUT_ACTIVE</text>
+
+          <rect x="884" y="64" width="214" height="72" class="svg-box svg-green"></rect>
+          <text x="908" y="92" class="svg-label">4. vLLM generation</text>
+          <text x="908" y="114" class="svg-small">response / tokens / old logprobs</text>
+
+          <line x1="252" y1="100" x2="320" y2="100" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="534" y1="100" x2="602" y2="100" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="816" y1="100" x2="884" y2="100" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+
+          <rect x="884" y="194" width="214" height="72" class="svg-box svg-cyan"></rect>
+          <text x="908" y="222" class="svg-label">5. reward / postprocess</text>
+          <text x="908" y="244" class="svg-small">RewardActorPool 计算 reward 或 reward ref</text>
+
+          <rect x="602" y="194" width="214" height="72" class="svg-box svg-cyan"></rect>
+          <text x="626" y="222" class="svg-label">6. SampleRecordBatch</text>
+          <text x="626" y="244" class="svg-small">写 ObjectRef，附 policy_version/checksum</text>
+
+          <rect x="320" y="194" width="214" height="72" class="svg-box svg-cyan"></rect>
+          <text x="344" y="222" class="svg-label">7. SampleQueueActor</text>
+          <text x="344" y="244" class="svg-small">accept/drop/defer，去重与 TTL</text>
+
+          <rect x="38" y="194" width="214" height="72" class="svg-box svg-violet"></rect>
+          <text x="62" y="222" class="svg-label">8. train trigger</text>
+          <text x="62" y="244" class="svg-small">token depth / batch size / lag / manual flush</text>
+
+          <line x1="991" y1="136" x2="991" y2="194" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="884" y1="230" x2="816" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="602" y1="230" x2="534" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="320" y1="230" x2="252" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+
+          <text x="40" y="340" class="svg-title">Hybrid train window and weight activation</text>
+          <rect x="38" y="366" width="214" height="74" class="svg-box svg-orange"></rect>
+          <text x="62" y="394" class="svg-label">9. drain hybrid rollout</text>
+          <text x="62" y="416" class="svg-small">停止新请求，flush 已完成 samples</text>
+
+          <rect x="320" y="366" width="214" height="74" class="svg-box svg-orange"></rect>
+          <text x="344" y="394" class="svg-label">10. offload rollout</text>
+          <text x="344" y="416" class="svg-small">释放 KV cache / engine CUDA residency</text>
+
+          <rect x="602" y="366" width="214" height="74" class="svg-box svg-blue"></rect>
+          <text x="626" y="394" class="svg-label">11. hydrate trainer</text>
+          <text x="626" y="416" class="svg-small">FSDP2 shard + optimizer 回 GPU</text>
+
+          <rect x="884" y="366" width="214" height="74" class="svg-box svg-blue"></rect>
+          <text x="908" y="394" class="svg-label">12. train window</text>
+          <text x="908" y="416" class="svg-small">consume reserved batch，optimizer step</text>
+
+          <line x1="252" y1="403" x2="320" y2="403" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="534" y1="403" x2="602" y2="403" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="816" y1="403" x2="884" y2="403" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+
+          <rect x="884" y="498" width="214" height="74" class="svg-box svg-violet"></rect>
+          <text x="908" y="526" class="svg-label">13. export/register</text>
+          <text x="908" y="548" class="svg-small">rank0 -> WeightMeta REGISTERED</text>
+
+          <rect x="602" y="498" width="214" height="74" class="svg-box svg-blue"></rect>
+          <text x="626" y="526" class="svg-label">14. offload trainer</text>
+          <text x="626" y="548" class="svg-small">CPU standby，process group idle</text>
+
+          <rect x="320" y="498" width="214" height="74" class="svg-box svg-green"></rect>
+          <text x="344" y="526" class="svg-label">15. wake rollout</text>
+          <text x="344" y="548" class="svg-small">加载目标 WeightMeta，重建 KV budget</text>
+
+          <rect x="38" y="498" width="214" height="74" class="svg-box svg-green"></rect>
+          <text x="62" y="526" class="svg-label">16. resume prompt</text>
+          <text x="62" y="548" class="svg-small">所有 rollout-capable workers 同版本 active</text>
+
+          <line x1="991" y1="440" x2="991" y2="498" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="884" y1="535" x2="816" y2="535" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="602" y1="535" x2="534" y2="535" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+          <line x1="320" y1="535" x2="252" y2="535" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
+
+          <rect x="38" y="660" width="1060" height="132" class="svg-box svg-red"></rect>
+          <text x="64" y="692" class="svg-label">Guard rails</text>
+          <text x="64" y="718" class="svg-small">fully_sync: max_policy_lag=0，所有 workers 必须激活同一个 W_t 才开始 rollout。</text>
+          <text x="64" y="744" class="svg-small">standalone_hybrid: rollout_only slots 训练窗口内继续生成，但 SampleQueue 必须用 policy lag、TTL、水位和 ObjectRef 上限过滤。</text>
+          <text x="64" y="770" class="svg-small">任何 hydrate/offload/barrier/activation 失败都不能让部分 FSDP ranks 或部分 rollout workers 带错误 epoch 继续推进。</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="modes">
+      <h2>运行模式</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>用户 YAML mode</th>
+            <th>内部 canonical mode</th>
+            <th>GPU slot 形态</th>
+            <th>rollout/train 语义</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>collocated</code></td>
+            <td><code>fully_sync</code></td>
+            <td>全部 GPU 都是 <code>hybrid</code>；示例为 8 个 hybrid、0 个 rollout_only。</td>
+            <td>全局 barrier：同一版本权重完成 rollout 后，全体 slot 切 train，再发布下一版本。<code>max_policy_lag=0</code>。</td>
+          </tr>
+          <tr>
+            <td><code>disaggregated</code></td>
+            <td><code>standalone_hybrid</code></td>
+            <td>同时存在 <code>rollout_only</code> 与 <code>hybrid</code>；示例为 4 个 rollout_only、4 个 hybrid。</td>
+            <td>rollout_only 持续生成；hybrid 在训练窗口 drain 后切到 trainer ranks。允许 bounded staleness，例如 <code>max_policy_lag=2</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout warn">
+        <p>
+          <code>sync</code> / <code>async</code> 不是用户入口别名；<code>fully_sync</code> / <code>standalone_hybrid</code> 也不能直接作为用户 YAML <code>mode</code>。
+          这些内部名只应该出现在 resolved config、日志和 FSM 中。
+        </p>
+      </div>
+    </section>
+
+    <section id="components">
+      <h2>组件设计</h2>
+      <div class="grid-2">
+        <div class="box">
+          <h3><code>main.py</code> 与配置加载</h3>
+          <p>用户入口只负责读取 YAML、处理 <code>run.intent</code>、归一化 mode、校验 artifact 和资源拓扑、输出 resolved config，并生成不可变 <code>LaunchConfig</code>。训练参数不应拆成命令行覆盖面。</p>
+        </div>
+        <div class="box">
+          <h3>Ray Driver</h3>
+          <p>负责 <code>ray.init</code>、单机资源校验、placement group 规划和创建 <code>ControllerActor</code>。v0.1 不加入 Kubernetes、Slurm、SSH 或多节点 Ray launcher。</p>
+        </div>
+        <div class="box">
+          <h3><code>ControllerActor</code></h3>
+          <p>唯一 loop 语义 owner。它决定何时发 prompt、何时开 train window、何时限流、何时进入 degraded 或 paused，并统一解释 actor 异常为 health event。</p>
+        </div>
+        <div class="box">
+          <h3>Mode FSM</h3>
+          <p>维护 <code>BOOTSTRAP</code>、<code>FULLY_SYNC_ACTIVE</code>、<code>STANDALONE_HYBRID_ACTIVE</code>、<code>DEGRADED_SYNC</code>、<code>PAUSED</code> 和 <code>STOPPED</code>。FSM 只处理 canonical mode。</p>
+        </div>
+        <div class="box">
+          <h3><code>GpuSlotActor</code></h3>
+          <p>每张 GPU 一个 slot actor，独占 Ray <code>num_gpus=1</code>。它管理 slot 内 rollout/train role 的 lifecycle、CUDA residency、toggle、epoch 和 fail-fast active-role gate。</p>
+        </div>
+        <div class="box">
+          <h3>Hybrid toggle</h3>
+          <p>默认策略是 <code>swap_on_toggle</code>。rollout -> train 时 drain generation、flush sample、释放 vLLM/KV cache、hydrate trainer state；train -> rollout 时完成安全点、发布权重、offload trainer、唤醒 rollout。</p>
+        </div>
+        <div class="box">
+          <h3>FSDP2 Trainer</h3>
+          <p><code>TrainerCoordinatorActor</code> 汇总 hybrid slots，建立 rank/world size 和稳定通信组；<code>TrainerRank</code> role 执行 PPO-like forward/backward、optimizer step、checkpoint/export。queue ack 必须晚于 optimizer step 成功。</p>
+        </div>
+        <div class="box">
+          <h3>vLLM Rollout</h3>
+          <p><code>RolloutCoordinatorActor</code> 选择 prompt 与 target policy version，分发到 active rollout roles。<code>RolloutWorker</code> 使用 vLLM 生成 response、tokens 和 PPO 所需 old logprobs。</p>
+        </div>
+        <div class="box">
+          <h3><code>SampleQueueActor</code></h3>
+          <p>样本 lifecycle owner，维护 <code>pending</code>、<code>reserved</code>、<code>acked</code>、<code>dropped</code>、<code>failed</code>。它执行 TTL、policy lag、queue 水位、ObjectRef 背压和去重。</p>
+        </div>
+        <div class="box">
+          <h3><code>WeightRegistryActor</code></h3>
+          <p>权重版本 owner，区分 <code>REGISTERED</code> 和 <code>ACTIVE_GLOBAL</code>。trainer 注册 artifact 不代表 rollout 已经切换；只有所有必要 rollout workers ack 目标版本后才能全局 active。</p>
+        </div>
+        <div class="box">
+          <h3><code>RewardActorPool</code></h3>
+          <p>负责 rule reward、model reward 或后处理。它不拥有训练 loop，只把 reward 或 reward ref 附到样本数据路径中。</p>
+        </div>
+        <div class="box">
+          <h3><code>MetricsActor</code> / health sink</h3>
+          <p>接收指标、事件和 tracing payload。高频 token 级明细应先本地聚合，低频事件直接上报。Controller 依据连续阈值而不是单点指标做降级。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="actors">
+      <h2>Ray actor 清单</h2>
+      <p>
+        这里按当前设计列出所有 actor 或 actor-like role。关键约束是：同一张物理 GPU 不能同时存在两个都声明 <code>num_gpus=1</code> 的 Ray actor。
+        <code>TrainerRank</code> 和 <code>RolloutWorker</code> 可以先实现为 <code>GpuSlotActor</code> 内部对象，也可以是 slot 托管的轻量 child actor，但不应再申请独立 GPU token。
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Actor / role</th>
+            <th>Ray 资源</th>
+            <th>职责</th>
+            <th>主要交互</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>ControllerActor</code></td>
+            <td>CPU actor</td>
+            <td>训练主循环、模式 FSM、slot 编排、train trigger、背压和恢复策略。</td>
+            <td>创建并调用 slot、coordinator、queue、registry、metrics；把异常归一化为 health event。</td>
+          </tr>
+          <tr>
+            <td><code>GpuSlotActor</code></td>
+            <td><code>num_gpus=1</code> heavy actor</td>
+            <td>一张物理 GPU 的唯一 owner；管理 rollout/train role 生命周期、CUDA device、active role、toggle 和失败状态。</td>
+            <td>接受 Controller/coordinator 的 phase request；托管 <code>RolloutWorker</code> 和/或 <code>TrainerRank</code> role；上报 Metrics。</td>
+          </tr>
+          <tr>
+            <td><code>RolloutCoordinatorActor</code></td>
+            <td>CPU actor</td>
+            <td>prompt 分发、worker 选择、target policy version 选择、in-flight 跟踪、queue 背压响应、全局权重切换暂停。</td>
+            <td>读 <code>WeightRegistryActor</code>，调用 slot-hosted rollout role，向 <code>SampleQueueActor</code> 提交样本 metadata/ref。</td>
+          </tr>
+          <tr>
+            <td><code>RolloutWorker</code> role</td>
+            <td>slot 内 GPU role；不独立申请 GPU token</td>
+            <td>运行 vLLM engine，激活权重，生成 response/tokens/old logprobs，drain in-flight，释放 KV cache/CUDA residency。</td>
+            <td>被 <code>GpuSlotActor</code> gate；接收 <code>RolloutCoordinatorActor</code> 请求；调用 reward 或提交 sample refs。</td>
+          </tr>
+          <tr>
+            <td><code>TrainerCoordinatorActor</code></td>
+            <td>CPU actor</td>
+            <td>汇总 train-capable hybrid slots，管理 rank mapping、world size、group_epoch、train window、batch reservation 与错误归一化。</td>
+            <td>从 <code>SampleQueueActor</code> reserve/ack/release batch；协调 <code>TrainerRank</code> roles；rank0/export 后注册权重。</td>
+          </tr>
+          <tr>
+            <td><code>TrainerRank</code> role</td>
+            <td>slot 内 GPU role；不独立申请 GPU token</td>
+            <td>FSDP2 rank，管理 model shard、optimizer/scheduler/RNG/scaler，执行 micro-batch forward/backward、optimizer step、checkpoint shard。</td>
+            <td>被 <code>GpuSlotActor</code> gate；由 <code>TrainerCoordinatorActor</code> 下发 rendezvous 和 batch refs；rank0/exporter 产出权重。</td>
+          </tr>
+          <tr>
+            <td><code>SampleQueueActor</code></td>
+            <td>CPU actor</td>
+            <td>样本队列、dedupe、TTL、policy lag guard、ObjectRef 背压、reservation lease、drop/defer/ack 状态。</td>
+            <td>接收 rollout sample refs；向 trainer 提供 train batch reservation；上报 drop rate、depth、object store pressure。</td>
+          </tr>
+          <tr>
+            <td><code>WeightRegistryActor</code></td>
+            <td>CPU actor</td>
+            <td>权重版本注册、状态机、latest healthy 查询、activation ack、rollback/deprecated 标记。</td>
+            <td>接收 trainer export 后的 <code>WeightMeta</code>；供 rollout coordinator 选择版本；等待 rollout workers ack 后标记 <code>ACTIVE_GLOBAL</code>。</td>
+          </tr>
+          <tr>
+            <td><code>RewardActor</code> / <code>RewardActorPool</code></td>
+            <td>CPU actor；未来可选 GPU</td>
+            <td>reward function、rule reward、model reward 或样本后处理。</td>
+            <td>被 rollout path 调用；结果写入 <code>SampleRecord</code> 或 reward ref；指标进入 <code>MetricsActor</code>。</td>
+          </tr>
+          <tr>
+            <td><code>MetricsActor</code></td>
+            <td>CPU actor</td>
+            <td>指标、health events、trace 聚合和阈值输入。</td>
+            <td>接收所有 actor/role 的事件；供 Controller 判断 degraded、paused、recovery。</td>
+          </tr>
+          <tr>
+            <td><code>RolloutGroupActor</code>（未来条件）</td>
+            <td>CPU/group coordinator；slot 仍持 GPU token</td>
+            <td>当 vLLM <code>tensor_parallel_size &gt; 1</code> 时，以 group 为单位管理 TP 通信、sleep/wake/offload 和失败恢复。</td>
+            <td>聚合多个 <code>GpuSlotActor</code>；对 <code>RolloutCoordinatorActor</code> 暴露一个 logical worker。v0.1 默认不启用。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="protocols">
+      <h2>协议与状态</h2>
+      <div class="grid-2">
+        <div class="box">
+          <h3><code>SampleRecord</code></h3>
+          <p>必须包含 <code>sample_id</code>、<code>policy_version</code>、prompt、response、tokens、logprobs、reward。扩展字段包括 <code>request_id</code>、<code>weight_checksum</code>、finish reason、TTL、token counts、old logprobs 和 worker metadata。</p>
+        </div>
+        <div class="box">
+          <h3><code>WeightMeta</code></h3>
+          <p>必须包含 <code>version_id</code>、创建时间、source type、model URI、format 和 checksum。artifact 来源只接受 <code>hdfs_uri</code> 或 <code>hdfs_fuse_path</code>，不把大权重经 Ray object store 广播。</p>
+        </div>
+        <div class="box">
+          <h3><code>TrainBatch</code></h3>
+          <p>trainer 消费侧聚合协议，记录 sample refs、版本范围、版本直方图、sequence/token 数、reservation owner 和 lease 过期时间。ack 晚于 optimizer step 成功。</p>
+        </div>
+        <div class="box">
+          <h3>Health events</h3>
+          <p>最小事件集覆盖 rollout stale weight、queue backpressure、sample TTL/policy lag drop、trainer OOM、weight distribution failure、hybrid toggle timeout、comm group rebuild 和 object store pressure。</p>
+        </div>
+      </div>
+
+      <h3>Hybrid slot toggle 状态</h3>
+      <div class="pill-row">
+        <span class="pill">ROLLOUT_ACTIVE</span>
+        <span class="pill">ROLLOUT_DRAINING</span>
+        <span class="pill">ROLLOUT_OFFLOADING_CPU</span>
+        <span class="pill">TRAIN_HYDRATING_GPU</span>
+        <span class="pill">TRAIN_READY_BARRIER</span>
+        <span class="pill">TRAIN_ACTIVE</span>
+        <span class="pill">TRAIN_DRAINING</span>
+        <span class="pill">TRAIN_OFFLOADING_CPU</span>
+        <span class="pill">ROLLOUT_WAKING_GPU</span>
+        <span class="pill">ROLLOUT_READY_BARRIER</span>
+      </div>
+      <p>
+        正常 toggle 不销毁 FSDP2 process group。通信组生命周期长于一次 train window，rank mapping 和 rendezvous metadata 保持稳定；
+        只有 slot/rank failure、NCCL error、作业恢复或 shutdown 才 rebuild，并生成新的 <code>comm_epoch</code>。
+      </p>
+    </section>
+
+    <section id="risks">
+      <h2>关键约束与风险</h2>
+      <ul>
+        <li><strong>GPU ownership：</strong><code>GpuSlotActor</code> 是唯一申请 <code>num_gpus=1</code> 的 actor。role 绕过 slot owner 执行 CUDA 会破坏 hybrid 安全性。</li>
+        <li><strong>bounded staleness：</strong><code>standalone_hybrid</code> 允许旧权重样本，但必须受 <code>max_policy_lag</code>、TTL、drop/degrade 策略约束，不能演化成无界 async。</li>
+        <li><strong>权重状态：</strong><code>REGISTERED</code> 只代表 artifact 可用，不代表 rollout 已经服务该版本。全局恢复 prompt 前必须收齐 activation ack。</li>
+        <li><strong>queue ack：</strong>trainer 失败时不能丢样本。queue ack 必须在 optimizer step 成功之后；失败路径 release reservation 或标记不可重试。</li>
+        <li><strong>process group：</strong>高频 toggle 不应 destroy/reinit FSDP2 process group，否则正常调度路径会变成容易 deadlock 的路径。</li>
+        <li><strong>v0.1 范围：</strong>不加入多机 Ray、Kubernetes、Slurm、SSH launcher，也不支持 rollout TP &gt; 1，除非重新打开设计。</li>
+      </ul>
+    </section>
+
+    <section id="sources">
+      <h2>事实来源</h2>
+      <p>本 HTML 当前依据以下仓库文件整理。未来修改这些文件时，需同步检查本 HTML 的对应章节和 SVG。</p>
+      <ul class="source-list">
+        <li><a href="../../README.md"><code>README.md</code></a>：项目定位和文档索引。</li>
+        <li><a href="../../plan-design.md"><code>plan-design.md</code></a>：主架构、actor、模式、协议、调度、故障恢复。</li>
+        <li><a href="../../ref-flashrl-design.md"><code>ref-flashrl-design.md</code></a>：FlashRL 参考抽取。</li>
+        <li><a href="mode-fsm.md"><code>docs/architecture/mode-fsm.md</code></a>：mode normalization 和 hybrid toggle FSM。</li>
+        <li><a href="../protocols/runtime-config.schema.yaml"><code>docs/protocols/runtime-config.schema.yaml</code></a>：runtime config schema。</li>
+        <li><a href="../protocols/sample-record.schema.yaml"><code>docs/protocols/sample-record.schema.yaml</code></a>：sample record schema。</li>
+        <li><a href="../protocols/weight-meta.schema.yaml"><code>docs/protocols/weight-meta.schema.yaml</code></a>：weight metadata schema。</li>
+        <li><a href="../protocols/health-events.md"><code>docs/protocols/health-events.md</code></a>：health event 草案。</li>
+        <li><a href="../examples/collocated.yaml"><code>docs/examples/collocated.yaml</code></a>：fully_sync/collocated 示例。</li>
+        <li><a href="../examples/disaggregated.yaml"><code>docs/examples/disaggregated.yaml</code></a>：standalone_hybrid/disaggregated 示例。</li>
+      </ul>
+    </section>
+  </div>
+</body>
+</html>

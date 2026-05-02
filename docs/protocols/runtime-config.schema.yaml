@@ -1,0 +1,280 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: NanoRLRuntimeConfig
+type: object
+required: [run, runtime, mode, parallel, model, data, algorithm, trainer, rollout, control]
+properties:
+  run:
+    type: object
+    required: [intent]
+    properties:
+      intent:
+        type: string
+        enum: [train, dry_run, validate]
+      emit_resolved_config:
+        type: boolean
+  runtime:
+    type: object
+    required: [backend, local, storage, ray]
+    properties:
+      backend:
+        type: string
+        enum: [ray]
+      local:
+        type: object
+        required: [num_gpus, cpus]
+        properties:
+          num_gpus: { type: integer, minimum: 1 }
+          cpus: { type: integer, minimum: 1 }
+      storage:
+        type: object
+        required: [allowed_input_sources]
+        properties:
+          allowed_input_sources:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              type: string
+              enum: [hdfs_uri, hdfs_fuse_path]
+          hdfs:
+            type: object
+            required: [cli]
+            properties:
+              cli: { type: string, minLength: 1 }
+              read_probe_timeout_sec: { type: integer, minimum: 1 }
+          hdfs_fuse:
+            type: object
+            required: [mount_root]
+            properties:
+              mount_root:
+                type: string
+                pattern: "^/"
+              require_mount: { type: boolean }
+              read_probe_timeout_sec: { type: integer, minimum: 1 }
+      ray:
+        type: object
+        required: [address, namespace, gpu_manager, placement]
+        properties:
+          address:
+            type: string
+          namespace:
+            type: string
+            minLength: 1
+          gpu_manager:
+            type: object
+            required: [enabled, actor_per_gpu, slots, hybrid_toggle]
+            properties:
+              enabled: { type: boolean }
+              actor_per_gpu:
+                type: boolean
+                const: true
+              slots:
+                type: object
+                required: [rollout_only, hybrid]
+                properties:
+                  rollout_only: { type: integer, minimum: 0 }
+                  hybrid: { type: integer, minimum: 0 }
+                  idle: { type: integer, minimum: 0 }
+              hybrid_toggle:
+                type: object
+                required: [strategy, rollout_drain_timeout_sec, train_drain_timeout_sec, cuda_quiesce_timeout_sec, offload]
+                properties:
+                  strategy:
+                    type: string
+                    enum: [swap_on_toggle, dual_resident]
+                  rollout_drain_timeout_sec: { type: integer, minimum: 1 }
+                  train_drain_timeout_sec: { type: integer, minimum: 1 }
+                  cuda_quiesce_timeout_sec: { type: integer, minimum: 1 }
+                  offload:
+                    type: object
+                    required: [trainer_model, trainer_optimizer, rollout_engine]
+                    properties:
+                      trainer_model:
+                        type: string
+                        enum: [cpu_pinned, cpu]
+                      trainer_optimizer:
+                        type: string
+                        enum: [cpu_pinned, cpu]
+                      rollout_engine:
+                        type: string
+                        enum: [vllm_sleep, teardown_and_reload]
+                      vllm_sleep_level:
+                        type: integer
+                        enum: [1, 2]
+                      cpu_memory_budget_gb:
+                        type: number
+                        minimum: 1
+                      residual_gpu_memory_budget_mb:
+                        type: integer
+                        minimum: 0
+                    allOf:
+                      - if:
+                          properties:
+                            rollout_engine: { const: vllm_sleep }
+                        then:
+                          required: [vllm_sleep_level]
+          placement:
+            type: object
+            required: [trainer, rollout]
+            properties:
+              trainer:
+                type: object
+                required: [num_ranks, gpus_per_rank]
+                properties:
+                  num_ranks: { type: integer, minimum: 1 }
+                  gpus_per_rank: { type: number, minimum: 0 }
+                  cpus_per_rank: { type: number, minimum: 0 }
+              rollout:
+                type: object
+                required: [num_actors, gpus_per_actor, tensor_parallel_size]
+                properties:
+                  num_actors: { type: integer, minimum: 1 }
+                  gpus_per_actor: { type: number, minimum: 0 }
+                  tensor_parallel_size: { type: integer, minimum: 1 }
+              reward:
+                type: object
+                properties:
+                  num_actors: { type: integer, minimum: 1 }
+                  cpus_per_actor: { type: number, minimum: 0 }
+  mode:
+    type: string
+    enum: [collocated, disaggregated]
+  parallel:
+    type: object
+    required: [trainer, rollout]
+    properties:
+      trainer:
+        type: object
+        required: [data_parallel_size, fsdp_world_size]
+        properties:
+          data_parallel_size: { type: integer, minimum: 1 }
+          fsdp_world_size: { type: integer, minimum: 1 }
+          tensor_parallel_size: { type: integer, minimum: 1 }
+          pipeline_parallel_size: { type: integer, minimum: 1 }
+      rollout:
+        type: object
+        required: [data_parallel_size, tensor_parallel_size]
+        properties:
+          data_parallel_size: { type: integer, minimum: 1 }
+          tensor_parallel_size: { type: integer, minimum: 1 }
+  model:
+    type: object
+    required: [source_type, model_uri]
+    properties:
+      source_type:
+        type: string
+        enum: [hdfs_uri, hdfs_fuse_path]
+      model_uri: { type: string, minLength: 1 }
+      tokenizer_uri: { type: string, minLength: 1 }
+    allOf:
+      - if:
+          properties:
+            source_type: { const: hdfs_uri }
+        then:
+          properties:
+            model_uri: { pattern: "^hdfs://" }
+            tokenizer_uri: { pattern: "^hdfs://" }
+      - if:
+          properties:
+            source_type: { const: hdfs_fuse_path }
+        then:
+          properties:
+            model_uri: { pattern: "^/" }
+            tokenizer_uri: { pattern: "^/" }
+  data:
+    type: object
+    required: [source_type, dataset_uri]
+    properties:
+      source_type:
+        type: string
+        enum: [hdfs_uri, hdfs_fuse_path]
+      dataset_uri: { type: string, minLength: 1 }
+      prompt_column: { type: string, minLength: 1 }
+    allOf:
+      - if:
+          properties:
+            source_type: { const: hdfs_uri }
+        then:
+          properties:
+            dataset_uri: { pattern: "^hdfs://" }
+      - if:
+          properties:
+            source_type: { const: hdfs_fuse_path }
+        then:
+          properties:
+            dataset_uri: { pattern: "^/" }
+  algorithm:
+    type: object
+    required: [name, max_steps, learning_rate]
+    properties:
+      name:
+        type: string
+        enum: [ppo]
+      max_steps: { type: integer, minimum: 1 }
+      learning_rate: { type: number, exclusiveMinimum: 0 }
+      seed: { type: integer, minimum: 0 }
+  trainer:
+    type: object
+    required: [backend, global_batch_size, fsdp2]
+    properties:
+      backend:
+        type: string
+        enum: [fsdp2]
+      global_batch_size:
+        type: integer
+        minimum: 1
+      fsdp2:
+        type: object
+        required: [mixed_precision, sharding]
+        properties:
+          mixed_precision:
+            type: string
+            enum: [bf16, fp16]
+          sharding:
+            type: string
+            enum: [full_shard, hybrid_shard]
+  rollout:
+    type: object
+    required: [backend]
+    properties:
+      backend:
+        type: string
+        enum: [vllm]
+      partial_rollout:
+        type: object
+        required: [enabled, pause_mode, clear_cache, mixed_policy_samples]
+        properties:
+          enabled: { type: boolean }
+          pause_mode:
+            type: string
+            enum: [keep]
+          clear_cache:
+            type: boolean
+            const: true
+          mixed_policy_samples:
+            type: string
+            enum: [train, drop]
+      hybrid:
+        type: object
+        properties:
+          enabled:
+            type: boolean
+          precision_mix:
+            type: object
+            properties:
+              bf16: { type: number, minimum: 0, maximum: 1 }
+              fp8: { type: number, minimum: 0, maximum: 1 }
+          policy_pin:
+            type: object
+            properties:
+              latest_ratio: { type: number, minimum: 0, maximum: 1 }
+              lagged_ratio: { type: number, minimum: 0, maximum: 1 }
+  control:
+    type: object
+    required: [max_policy_lag, sample_ttl_sec, queue_high_watermark, max_pending_rollout_refs, max_pending_train_refs]
+    properties:
+      max_policy_lag: { type: integer, minimum: 0 }
+      sample_ttl_sec: { type: integer, minimum: 1 }
+      queue_high_watermark: { type: integer, minimum: 1 }
+      max_pending_rollout_refs: { type: integer, minimum: 1 }
+      max_pending_train_refs: { type: integer, minimum: 1 }
