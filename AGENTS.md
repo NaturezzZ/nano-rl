@@ -14,9 +14,11 @@ subdirectory.
 
 ## Current Project State
 
-`nano-rl` is currently in a design-first stage. Do not assume a complete Python
-package or runtime implementation exists yet. Treat the existing documents and
-schemas as the source of truth before adding code.
+`nano-rl` is currently in a design-first / early-implementation stage. An
+initial Python runtime skeleton exists, but do not assume a complete trainer,
+rollout, or Ray execution implementation exists yet. Treat the existing
+documents, schemas, and core runtime tests as the source of truth before adding
+code.
 
 Canonical documents:
 
@@ -29,6 +31,10 @@ Canonical documents:
 - `docs/protocols/*.yaml`: draft protocol/config schemas.
 - `docs/examples/collocated.yaml`: collocated runtime config.
 - `docs/examples/disaggregated.yaml`: disaggregated runtime config.
+- `nano_rl/`: initial runtime skeleton with config models, resolved GPU plan,
+  lease manager, queue, registry, coordinators, metrics, and Ray wrapper
+  boundaries.
+- `tests/`: narrow validation tests for config normalization and runtime cores.
 
 ## Architecture Invariants
 
@@ -48,30 +54,35 @@ Canonical documents:
 - v0.1 only needs to support a single machine. Do not add multi-node Ray,
   Kubernetes, Slurm, or SSH launch behavior unless the design is explicitly
   reopened.
-- Training launches must express resource topology parameters such as local GPU
-  count, rollout-only GPU slot allocation, hybrid GPU slot allocation, and
-  parallel dimensions in YAML. Do not build a second training-parameter surface
-  in command-line flags.
+- Training launches must express resource topology as quantities such as local
+  GPU count, rollout-only GPU count, shared rollout/train GPU count, rollout
+  DP/TP, and trainer ranks in YAML. Do not require users to hand-write physical
+  GPU ids; the system must expand a deterministic resolved GPU plan.
 - The trainer backend target is PyTorch FSDP2.
 - The rollout backend target is vLLM.
 - The v0.1 execution layer is Ray-native actor runtime. Ray is not an optional
   platform adapter in this design stage.
-- Ray GPU ownership is slot-based: create one `GpuSlotActor` per physical GPU
-  slot, and let that actor own the Ray `num_gpus=1` token for the slot.
-- Role actors/roles such as rollout and train live under `GpuSlotActor`
-  ownership. Do not create two independent Ray actors that both request
-  `num_gpus=1` for the same GPU.
-- GPU slot modes are `rollout_only`, `hybrid`, and optional `idle`.
-  `rollout_only` slots keep doing standalone rollout continuously. `hybrid`
-  slots do rollout when not training and toggle into trainer ranks during train
-  windows.
-- Hybrid GPU slots must switch through an explicit toggle state machine. Only
-  one role may be active on a hybrid slot at a time, and inactive roles must not
+- GPU ownership is lease-based: `GpuLeaseManagerActor` is a CPU actor that owns
+  physical GPU active-role state and lease epochs. It does not request
+  `num_gpus=1`.
+- Rollout and trainer execution actors are separate failure domains. Long-lived
+  rollout/trainer actors should not both request Ray `num_gpus=1`; use
+  role-scoped custom resources such as `rollout_gpu_4` / `train_gpu_4` plus
+  lease-token checks before CUDA work.
+- GPU topology modes are quantity based: `rollout_only_gpus`,
+  `shared_gpus`, and optional `idle_gpus`. Rollout actors are unique within the
+  rollout assignment set, trainer ranks are unique within the trainer assignment
+  set, and the two sets may overlap through `shared_gpus`.
+- Shared GPUs must switch through an explicit lease/toggle state machine. Only
+  one role may be active on a shared GPU at a time, and inactive roles must not
   execute CUDA kernels.
 - Local-first and standalone/distributed paths should share the same runtime
   protocol surface instead of diverging into separate semantics.
 - The controller/orchestrator owns loop semantics. Backend roles such as
   trainer, rollout, serving, queue, and weight bus should remain replaceable.
+- `RolloutManagerActor` owns prompt backlog, in-flight accounting, queue
+  backpressure response, and rollout pump scheduling. Dataloaders should feed
+  prompts into the manager instead of calling rollout workers directly.
 - Weight and sample protocols must carry policy/version metadata. Do not add
   data paths that bypass `policy_version` / weight version accounting.
 - In `standalone_hybrid`, enforce bounded staleness with policy lag, sample TTL,
@@ -82,18 +93,24 @@ Canonical documents:
 - Before implementing or changing architecture, write the design update into
   `plan-design.md` and, when relevant, the schemas/examples under `docs/`.
 - Keep `docs/architecture/design.html` synchronized with architecture changes
-  that affect components, Ray actors, GPU slots, runtime flows, schemas, or
+  that affect components, Ray actors, GPU leases, runtime flows, schemas, or
   examples.
+- When the user accepts a design direction with wording such as "不错，就这样干",
+  update `plan-design.md`, `docs/architecture/design.html`, and relevant
+  schemas/examples in the same pass; do not wait for a separate reminder.
 - Keep `main.py` thin: locate/read the YAML config, validate, normalize, emit the
   resolved config when requested, and hand off to the Ray driver. Do not put the
   training loop directly in `main.py`.
 - Preserve YAML-first semantics. Do not add per-field command-line overrides;
   `run.intent`, resource topology, mode, and training parameters belong in YAML.
 - Keep schemas and examples synchronized when changing protocol fields.
-- Keep `runtime.ray.gpu_manager.slots` consistent with placement fields:
-  `trainer.num_ranks == hybrid`, and
-  `rollout.num_actors * gpus_per_actor == rollout_only + hybrid`.
-- Prefer `swap_on_toggle` for hybrid slots in v0.1. A future `dual_resident`
+- Keep `runtime.ray.gpu_manager.topology` consistent with placement fields:
+  `trainer.num_ranks == shared_gpus`, and
+  `rollout.num_replicas * rollout.tensor_parallel_size ==
+  rollout_only_gpus + shared_gpus`.
+- Require `rollout_only_gpus` and `shared_gpus` to be divisible by rollout
+  `tensor_parallel_size`, so a vLLM TP group never straddles lifecycle regions.
+- Prefer `swap_on_toggle` for shared GPUs in v0.1. A future `dual_resident`
   strategy is allowed only when the inactive role still cannot run CUDA work.
 - Use Pydantic or a structured parser for protocol/config handling once code is
   introduced; avoid ad hoc string parsing for YAML/JSON data.

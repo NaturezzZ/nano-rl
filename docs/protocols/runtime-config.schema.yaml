@@ -62,19 +62,29 @@ properties:
             minLength: 1
           gpu_manager:
             type: object
-            required: [enabled, actor_per_gpu, slots, hybrid_toggle]
+            required: [enabled, lease_manager, topology, role_classes, hybrid_toggle]
             properties:
-              enabled: { type: boolean }
-              actor_per_gpu:
+              enabled:
                 type: boolean
                 const: true
-              slots:
+              lease_manager:
+                type: boolean
+                const: true
+              role_classes:
                 type: object
-                required: [rollout_only, hybrid]
+                required: [rollout_manager, rollout_replica_controller, rollout_worker]
                 properties:
-                  rollout_only: { type: integer, minimum: 0 }
-                  hybrid: { type: integer, minimum: 0 }
-                  idle: { type: integer, minimum: 0 }
+                  rollout_manager: { type: string, minLength: 1 }
+                  rollout_replica_controller: { type: string, minLength: 1 }
+                  rollout_worker: { type: string, minLength: 1 }
+                  trainer_rank: { type: string, minLength: 1 }
+              topology:
+                type: object
+                required: [rollout_only_gpus, shared_gpus]
+                properties:
+                  rollout_only_gpus: { type: integer, minimum: 0 }
+                  shared_gpus: { type: integer, minimum: 0 }
+                  idle_gpus: { type: integer, minimum: 0 }
               hybrid_toggle:
                 type: object
                 required: [strategy, rollout_drain_timeout_sec, train_drain_timeout_sec, cuda_quiesce_timeout_sec, offload]
@@ -126,10 +136,10 @@ properties:
                   cpus_per_rank: { type: number, minimum: 0 }
               rollout:
                 type: object
-                required: [num_actors, gpus_per_actor, tensor_parallel_size]
+                required: [num_replicas, gpus_per_replica, tensor_parallel_size]
                 properties:
-                  num_actors: { type: integer, minimum: 1 }
-                  gpus_per_actor: { type: number, minimum: 0 }
+                  num_replicas: { type: integer, minimum: 1 }
+                  gpus_per_replica: { type: integer, minimum: 1 }
                   tensor_parallel_size: { type: integer, minimum: 1 }
               reward:
                 type: object
@@ -159,36 +169,18 @@ properties:
           tensor_parallel_size: { type: integer, minimum: 1 }
   model:
     type: object
-    required: [source_type, model_uri]
+    required: [model_path]
     properties:
-      source_type:
-        type: string
-        enum: [hdfs_uri, hdfs_fuse_path]
-      model_uri: { type: string, minLength: 1 }
-      tokenizer_uri: { type: string, minLength: 1 }
-    allOf:
-      - if:
-          properties:
-            source_type: { const: hdfs_uri }
-        then:
-          properties:
-            model_uri: { pattern: "^hdfs://" }
-            tokenizer_uri: { pattern: "^hdfs://" }
-      - if:
-          properties:
-            source_type: { const: hdfs_fuse_path }
-        then:
-          properties:
-            model_uri: { pattern: "^/" }
-            tokenizer_uri: { pattern: "^/" }
+      model_path: { type: string, minLength: 1 }
+      tokenizer_path: { type: string, minLength: 1 }
   data:
     type: object
-    required: [source_type, dataset_uri]
+    required: [source_type, data_path]
     properties:
       source_type:
         type: string
         enum: [hdfs_uri, hdfs_fuse_path]
-      dataset_uri: { type: string, minLength: 1 }
+      data_path: { type: string, minLength: 1 }
       prompt_column: { type: string, minLength: 1 }
     allOf:
       - if:
@@ -196,13 +188,13 @@ properties:
             source_type: { const: hdfs_uri }
         then:
           properties:
-            dataset_uri: { pattern: "^hdfs://" }
+            data_path: { pattern: "^hdfs://" }
       - if:
           properties:
             source_type: { const: hdfs_fuse_path }
         then:
           properties:
-            dataset_uri: { pattern: "^/" }
+            data_path: { pattern: "^/" }
   algorithm:
     type: object
     required: [name, max_steps, learning_rate]

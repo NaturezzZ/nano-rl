@@ -9,9 +9,9 @@
 - `TRAINER_GROUP_FAILED`
 - `WEIGHT_EXPORT_FAILED`
 - `WEIGHT_DISTRIBUTION_FAILED`
-- `HYBRID_TOGGLE_TIMEOUT`
-- `HYBRID_STATE_OFFLOAD_FAILED`
-- `HYBRID_STATE_HYDRATE_FAILED`
+- `SHARED_GPU_TOGGLE_TIMEOUT`
+- `SHARED_GPU_OFFLOAD_FAILED`
+- `SHARED_GPU_HYDRATE_FAILED`
 - `TRAINER_COMM_GROUP_UNHEALTHY`
 - `TRAINER_COMM_GROUP_REBUILT`
 - `OBJECT_STORE_PRESSURE`
@@ -23,7 +23,7 @@ event_id: str
 event_type: str
 severity: [info, warning, error, fatal]
 source_actor: str
-slot_id: optional[int]
+gpu_id: optional[int]
 policy_version: optional[int]
 group_epoch: optional[int]
 created_at: ts

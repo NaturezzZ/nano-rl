@@ -14,7 +14,7 @@ DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 DEFAULT_DATASET_ID = "roneneldan/TinyStories"
 DEFAULT_DATASET_SPLIT = "train"
 DEFAULT_DATASET_TEXT_COLUMN = "text"
-DEFAULT_DATASET_MAX_BYTES = 100 * 1000 * 1000
+DEFAULT_DATASET_MAX_BYTES: int | None = None
 
 
 SIZE_SUFFIXES = {
@@ -334,7 +334,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Download a Hugging Face model checkpoint and a pure-text Hugging Face "
-            "dataset for nano-rl smoke tests."
+            "dataset for nano-rl local tests. By default this downloads "
+            f"{DEFAULT_MODEL_ID} and the complete {DEFAULT_DATASET_ID} "
+            f"{DEFAULT_DATASET_SPLIT} split."
         )
     )
     parser.add_argument(
@@ -432,8 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=byte_size,
         default=DEFAULT_DATASET_MAX_BYTES,
         help=(
-            "Maximum UTF-8 bytes from dataset-text-column to save. Default: 100M. "
-            "Pass 0 to disable this cap."
+            "Optional maximum UTF-8 bytes from dataset-text-column to save. "
+            "By default the complete split is saved. Pass 100M or another size "
+            "for smaller smoke-test assets; pass 0 to explicitly disable the cap."
         ),
     )
     dataset.add_argument(

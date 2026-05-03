@@ -1,6 +1,15 @@
-# design stage placeholder
+# Base dependencies for config validation, local smoke tests, and the first
+# single-machine Ray/FSDP2/vLLM runtime implementation.
 pydantic>=2.0
 pyyaml>=6.0
 ray[default]
 huggingface-hub>=0.25
 datasets>=2.19
+transformers>=4.51
+safetensors>=0.4
+tokenizers>=0.20
+# FSDP2 is part of PyTorch; there is no standalone fsdp2 package. vLLM 0.6.1
+# pins torch==2.4.0, so keep these aligned when targeting torch 2.4.
+torch==2.4.0
+vllm==0.6.1.post2; platform_system == "Linux"
+pytest>=8.0

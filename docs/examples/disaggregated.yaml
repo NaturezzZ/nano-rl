@@ -21,11 +21,16 @@ runtime:
     namespace: nano-rl
     gpu_manager:
       enabled: true
-      actor_per_gpu: true
-      slots:
-        rollout_only: 4
-        hybrid: 4
-        idle: 0
+      lease_manager: true
+      role_classes:
+        rollout_manager: nano_rl.runtime.roles.RolloutManagerRole
+        rollout_replica_controller: nano_rl.runtime.roles.RolloutReplicaControllerRole
+        rollout_worker: nano_rl.runtime.roles.RolloutWorkerRole
+        trainer_rank: nano_rl.runtime.roles.TrainerRankRole
+      topology:
+        rollout_only_gpus: 4
+        shared_gpus: 4
+        idle_gpus: 0
       hybrid_toggle:
         strategy: swap_on_toggle
         rollout_drain_timeout_sec: 60
@@ -44,9 +49,9 @@ runtime:
         gpus_per_rank: 1
         cpus_per_rank: 8
       rollout:
-        num_actors: 8
-        gpus_per_actor: 1
-        tensor_parallel_size: 1
+        num_replicas: 4
+        gpus_per_replica: 2
+        tensor_parallel_size: 2
       reward:
         num_actors: 2
         cpus_per_actor: 4
@@ -60,17 +65,16 @@ parallel:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
   rollout:
-    data_parallel_size: 8
-    tensor_parallel_size: 1
+    data_parallel_size: 4
+    tensor_parallel_size: 2
 
 model:
-  source_type: hdfs_fuse_path
-  model_uri: /mnt/hdfs/models/qwen
-  tokenizer_uri: /mnt/hdfs/models/qwen
+  model_path: /mnt/hdfs/nano-ai/models/qwen
+  tokenizer_path: /mnt/hdfs/nano-ai/models/qwen
 
 data:
   source_type: hdfs_uri
-  dataset_uri: hdfs://namenode/datasets/prompts.jsonl
+  data_path: hdfs://namenode/datasets/prompts.jsonl
   prompt_column: prompt
 
 algorithm:

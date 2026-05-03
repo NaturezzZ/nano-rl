@@ -399,7 +399,7 @@
         <p>
           本 HTML 是 <code>plan-design.md</code>、<code>docs/architecture/mode-fsm.md</code>、
           <code>docs/protocols/*.yaml</code> 和 <code>docs/examples/*.yaml</code> 的浏览版索引。
-          它不是新的架构源头。后续如果修改 mode、actor、slot、schema、rollout/train 流程或示例 YAML，
+          它不是新的架构源头。后续如果修改 mode、actor、GPU lease、schema、rollout/train 流程或示例 YAML，
           同一个变更集中也要更新本文件。
         </p>
       </div>
@@ -436,11 +436,11 @@
         </div>
         <div class="box">
           <h3>Resource plane</h3>
-          <p>每张物理 GPU 对应一个 <code>GpuSlotActor(num_gpus=1)</code>。slot mode 为 <code>rollout_only</code>、<code>hybrid</code> 或 <code>idle</code>；hybrid slot 在 rollout role 与 trainer rank role 之间显式 toggle。</p>
+          <p>用户 YAML 只填写数量：<code>rollout_only_gpus</code>、<code>shared_gpus</code>、rollout DP/TP 和 trainer ranks。<code>LaunchConfig</code> 展开 deterministic <code>gpu_plan</code>，由 CPU-only <code>GpuLeaseManagerActor</code> 管理 active-role lease。</p>
         </div>
         <div class="box">
           <h3>Data plane</h3>
-          <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 指向 HDFS/HDFS-FUSE artifact，不把大权重放进 Ray object store。</p>
+          <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 指向 backend loader 可读取的模型或 checkpoint artifact，不把大权重放进 Ray object store。</p>
         </div>
       </div>
     </section>
@@ -448,7 +448,7 @@
     <section id="component-svg">
       <h2>SVG 组件关系图</h2>
       <p class="legend">
-        图中实线表示控制或数据调用关系，虚线表示由 <code>GpuSlotActor</code> 托管的 slot 内 role。真正申请 Ray GPU token 的只有 <code>GpuSlotActor</code>。
+        图中实线表示控制或数据调用关系。rollout 与 trainer execution actors 是独立故障域；它们通过 role-scoped logical resources 放置，并在执行 CUDA 前校验 <code>GpuLeaseManagerActor</code> 发放的 lease token。
       </p>
       <div class="diagram">
         <svg viewBox="0 0 1180 720" role="img" aria-label="nano-rl 组件关系图">
@@ -481,7 +481,7 @@
 
           <rect x="780" y="84" width="170" height="64" class="svg-box"></rect>
           <text x="804" y="111" class="svg-label">Mode FSM</text>
-          <text x="804" y="132" class="svg-small">fully_sync / hybrid</text>
+          <text x="804" y="132" class="svg-small">fully_sync / shared</text>
 
           <rect x="1000" y="84" width="120" height="64" class="svg-box"></rect>
           <text x="1020" y="111" class="svg-label">Metrics</text>
@@ -494,17 +494,19 @@
 
           <text x="28" y="232" class="svg-title">Resource Plane</text>
           <rect x="24" y="250" width="520" height="230" class="svg-box svg-orange"></rect>
-          <text x="48" y="280" class="svg-label">GpuSlotActor[gpu=i]</text>
-          <text x="48" y="302" class="svg-small">唯一持有 Ray num_gpus=1 token；负责 CUDA device、role lifecycle、active-role gate</text>
+          <text x="48" y="280" class="svg-label">GpuLeaseManager[gpu=i]</text>
+          <text x="48" y="302" class="svg-small">CPU actor；active role / holder / lease_epoch gate</text>
 
           <rect x="60" y="330" width="185" height="94" class="svg-box svg-green"></rect>
-          <text x="82" y="361" class="svg-label">rollout_only slot</text>
-          <text x="82" y="384" class="svg-small">RolloutWorker active</text>
-          <text x="82" y="404" class="svg-small">不参与 FSDP2 ranks</text>
+          <text x="82" y="356" class="svg-label">rollout_only GPU</text>
+          <text x="82" y="380" class="svg-small">only rollout lease</text>
+          <text x="82" y="400" class="svg-small">no trainer holder</text>
+          <text x="82" y="418" class="svg-small">toggle(train) fail-fast</text>
 
           <rect x="310" y="314" width="190" height="135" class="svg-box svg-cyan"></rect>
-          <text x="334" y="342" class="svg-label">hybrid slot</text>
-          <text x="334" y="364" class="svg-small">rollout <-> train toggle</text>
+          <text x="334" y="342" class="svg-label">shared GPU</text>
+          <text x="334" y="364" class="svg-small">rollout/train overlap</text>
+          <text x="334" y="382" class="svg-small">one active lease</text>
           <rect x="330" y="382" width="70" height="38" fill="#ffffff" stroke="#67e8f9" stroke-dasharray="4 4" rx="6"></rect>
           <text x="342" y="406" class="svg-small">Rollout</text>
           <rect x="414" y="382" width="70" height="38" fill="#ffffff" stroke="#67e8f9" stroke-dasharray="4 4" rx="6"></rect>
@@ -512,10 +514,10 @@
 
           <rect x="620" y="250" width="536" height="230" class="svg-box svg-green"></rect>
           <text x="644" y="280" class="svg-label">Logical role groups</text>
-          <text x="644" y="302" class="svg-small">coordinator actors aggregate slot-hosted roles; groups do not own GPU tokens directly</text>
+          <text x="644" y="302" class="svg-small">rollout manager / trainer coordinator aggregate role actors; CUDA access is lease gated</text>
 
           <rect x="650" y="330" width="190" height="66" class="svg-box"></rect>
-          <text x="670" y="357" class="svg-label">RolloutCoordinatorActor</text>
+          <text x="670" y="357" class="svg-label">RolloutManagerActor</text>
           <text x="670" y="378" class="svg-small">prompt routing / in-flight / versions</text>
 
           <rect x="906" y="330" width="190" height="66" class="svg-box"></rect>
@@ -547,8 +549,8 @@
           <text x="680" y="621" class="svg-small">WeightMeta / activation</text>
 
           <rect x="880" y="574" width="160" height="62" class="svg-box svg-blue"></rect>
-          <text x="902" y="600" class="svg-label">HDFS / FUSE</text>
-          <text x="902" y="621" class="svg-small">model / weights / data</text>
+          <text x="902" y="600" class="svg-label">Storage Paths</text>
+          <text x="902" y="621" class="svg-small">model / ckpt / data</text>
 
           <line x1="745" y1="396" x2="530" y2="574" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"></line>
           <line x1="530" y1="574" x2="404" y2="604" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"></line>
@@ -565,8 +567,9 @@
     <section id="rollout-svg">
       <h2>SVG rollout 全流程图</h2>
       <p>
-        下面把一次 rollout 从 prompt 分发到样本入队、训练消费、权重发布和全局激活串起来。<code>fully_sync</code> 下所有 GPU 都是 hybrid，
-        每轮 rollout 后整体切 train；<code>standalone_hybrid</code> 下只 drain hybrid slots，<code>rollout_only</code> slots 在背压与 policy lag guard 下继续生成。
+        下面把一次 rollout 从 prompt 分发到样本入队、训练消费、权重发布和全局激活串起来。<code>fully_sync</code> 下所有 rollout GPU 都来自 <code>shared_gpus</code>，
+        每轮 rollout 后整体切 train；<code>standalone_hybrid</code> 下只 drain 占用 <code>shared_gpus</code> 的 rollout replicas，
+        <code>rollout_only_gpus</code> 对应的 replicas 在背压与 policy lag guard 下继续生成。
       </p>
       <div class="diagram">
         <svg viewBox="0 0 1180 880" role="img" aria-label="rollout 过程流程图">
@@ -583,11 +586,11 @@
 
           <rect x="320" y="64" width="214" height="72" class="svg-box svg-green"></rect>
           <text x="344" y="92" class="svg-label">2. 选择 prompt/version</text>
-          <text x="344" y="114" class="svg-small">RolloutCoordinator 绑定 target_policy_version</text>
+          <text x="344" y="114" class="svg-small">RolloutManager 绑定 target_policy_version</text>
 
           <rect x="602" y="64" width="214" height="72" class="svg-box svg-orange"></rect>
           <text x="626" y="92" class="svg-label">3. active-role gate</text>
-          <text x="626" y="114" class="svg-small">GpuSlotActor 确认 ROLLOUT_ACTIVE</text>
+          <text x="626" y="114" class="svg-small">GpuLeaseManager 确认 rollout lease</text>
 
           <rect x="884" y="64" width="214" height="72" class="svg-box svg-green"></rect>
           <text x="908" y="92" class="svg-label">4. vLLM generation</text>
@@ -618,9 +621,9 @@
           <line x1="602" y1="230" x2="534" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
           <line x1="320" y1="230" x2="252" y2="230" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
 
-          <text x="40" y="340" class="svg-title">Hybrid train window and weight activation</text>
+          <text x="40" y="340" class="svg-title">Shared GPU train window and weight activation</text>
           <rect x="38" y="366" width="214" height="74" class="svg-box svg-orange"></rect>
-          <text x="62" y="394" class="svg-label">9. drain hybrid rollout</text>
+          <text x="62" y="394" class="svg-label">9. drain shared rollout</text>
           <text x="62" y="416" class="svg-small">停止新请求，flush 已完成 samples</text>
 
           <rect x="320" y="366" width="214" height="74" class="svg-box svg-orange"></rect>
@@ -649,11 +652,11 @@
 
           <rect x="320" y="498" width="214" height="74" class="svg-box svg-green"></rect>
           <text x="344" y="526" class="svg-label">15. wake rollout</text>
-          <text x="344" y="548" class="svg-small">加载目标 WeightMeta，重建 KV budget</text>
+          <text x="344" y="548" class="svg-small">校验 rollout lease 后加载 WeightMeta</text>
 
           <rect x="38" y="498" width="214" height="74" class="svg-box svg-green"></rect>
           <text x="62" y="526" class="svg-label">16. resume prompt</text>
-          <text x="62" y="548" class="svg-small">所有 rollout-capable workers 同版本 active</text>
+          <text x="62" y="548" class="svg-small">所有 rollout replicas 同版本 active</text>
 
           <line x1="991" y1="440" x2="991" y2="498" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
           <line x1="884" y1="535" x2="816" y2="535" stroke="#475569" stroke-width="2" marker-end="url(#flow-arrow)"></line>
@@ -663,8 +666,8 @@
           <rect x="38" y="660" width="1060" height="132" class="svg-box svg-red"></rect>
           <text x="64" y="692" class="svg-label">Guard rails</text>
           <text x="64" y="718" class="svg-small">fully_sync: max_policy_lag=0，所有 workers 必须激活同一个 W_t 才开始 rollout。</text>
-          <text x="64" y="744" class="svg-small">standalone_hybrid: rollout_only slots 训练窗口内继续生成，但 SampleQueue 必须用 policy lag、TTL、水位和 ObjectRef 上限过滤。</text>
-          <text x="64" y="770" class="svg-small">任何 hydrate/offload/barrier/activation 失败都不能让部分 FSDP ranks 或部分 rollout workers 带错误 epoch 继续推进。</text>
+          <text x="64" y="744" class="svg-small">standalone_hybrid: rollout_only_gpus 训练窗口内继续生成，但 SampleQueue 必须用 policy lag、TTL、水位和 ObjectRef 上限过滤。</text>
+          <text x="64" y="770" class="svg-small">任何 hydrate/offload/barrier/activation 失败或 lease epoch 过期都不能让部分 actors 继续推进。</text>
         </svg>
       </div>
     </section>
@@ -676,7 +679,7 @@
           <tr>
             <th>用户 YAML mode</th>
             <th>内部 canonical mode</th>
-            <th>GPU slot 形态</th>
+            <th>GPU topology</th>
             <th>rollout/train 语义</th>
           </tr>
         </thead>
@@ -684,14 +687,14 @@
           <tr>
             <td><code>collocated</code></td>
             <td><code>fully_sync</code></td>
-            <td>全部 GPU 都是 <code>hybrid</code>；示例为 8 个 hybrid、0 个 rollout_only。</td>
-            <td>全局 barrier：同一版本权重完成 rollout 后，全体 slot 切 train，再发布下一版本。<code>max_policy_lag=0</code>。</td>
+            <td><code>rollout_only_gpus=0</code>；全部 rollout GPU 都来自 <code>shared_gpus</code>。</td>
+            <td>全局 barrier：同一版本权重完成 rollout 后，所有 rollout replicas drain，shared GPU lease 切给 trainer，再发布下一版本。<code>max_policy_lag=0</code>。</td>
           </tr>
           <tr>
             <td><code>disaggregated</code></td>
             <td><code>standalone_hybrid</code></td>
-            <td>同时存在 <code>rollout_only</code> 与 <code>hybrid</code>；示例为 4 个 rollout_only、4 个 hybrid。</td>
-            <td>rollout_only 持续生成；hybrid 在训练窗口 drain 后切到 trainer ranks。允许 bounded staleness，例如 <code>max_policy_lag=2</code>。</td>
+            <td>同时存在 <code>rollout_only_gpus</code> 与 <code>shared_gpus</code>；示例为 4 张 rollout-only GPU、4 张 shared GPU。</td>
+            <td>rollout-only replicas 持续生成；shared replicas 在训练窗口 drain 后释放 lease 给 trainer ranks。允许 bounded staleness，例如 <code>max_policy_lag=2</code>。</td>
           </tr>
         </tbody>
       </table>
@@ -723,20 +726,20 @@
           <p>维护 <code>BOOTSTRAP</code>、<code>FULLY_SYNC_ACTIVE</code>、<code>STANDALONE_HYBRID_ACTIVE</code>、<code>DEGRADED_SYNC</code>、<code>PAUSED</code> 和 <code>STOPPED</code>。FSM 只处理 canonical mode。</p>
         </div>
         <div class="box">
-          <h3><code>GpuSlotActor</code></h3>
-          <p>每张 GPU 一个 slot actor，独占 Ray <code>num_gpus=1</code>。它管理 slot 内 rollout/train role 的 lifecycle、CUDA residency、toggle、epoch 和 fail-fast active-role gate。</p>
+          <h3><code>GpuLeaseManagerActor</code></h3>
+          <p>CPU-only actor，管理每张物理 GPU 的 active role、holder、lease epoch 和失败状态。rollout/train actors 可映射到同一张 shared GPU，但执行 CUDA 前必须校验 lease token。</p>
         </div>
         <div class="box">
-          <h3>Hybrid toggle</h3>
-          <p>默认策略是 <code>swap_on_toggle</code>。rollout -> train 时 drain generation、flush sample、释放 vLLM/KV cache、hydrate trainer state；train -> rollout 时完成安全点、发布权重、offload trainer、唤醒 rollout。</p>
+          <h3>Lease toggle</h3>
+          <p>默认策略是 <code>swap_on_toggle</code>，只对 <code>shared_gpus</code> 启用。rollout -> train 时 shared replicas drain、flush sample、释放 vLLM/KV cache，然后 lease 切给 trainer ranks；rollout-only GPUs 收到 trainer lease 必须 fail-fast。</p>
         </div>
         <div class="box">
           <h3>FSDP2 Trainer</h3>
-          <p><code>TrainerCoordinatorActor</code> 汇总 hybrid slots，建立 rank/world size 和稳定通信组；<code>TrainerRank</code> role 执行 PPO-like forward/backward、optimizer step、checkpoint/export。queue ack 必须晚于 optimizer step 成功。</p>
+          <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 执行 PPO-like forward/backward、optimizer step、checkpoint/export。queue ack 必须晚于 optimizer step 成功。</p>
         </div>
         <div class="box">
           <h3>vLLM Rollout</h3>
-          <p><code>RolloutCoordinatorActor</code> 选择 prompt 与 target policy version，分发到 active rollout roles。<code>RolloutWorker</code> 使用 vLLM 生成 response、tokens 和 PPO 所需 old logprobs。</p>
+          <p><code>RolloutManagerActor</code> 选择 prompt 与 target policy version，分发到 rollout DP replicas。每个 <code>RolloutReplicaControllerActor</code> 管理一个 vLLM TP group，<code>RolloutWorkerActor</code> 生成 response、tokens 和 PPO 所需 old logprobs。</p>
         </div>
         <div class="box">
           <h3><code>SampleQueueActor</code></h3>
@@ -760,8 +763,9 @@
     <section id="actors">
       <h2>Ray actor 清单</h2>
       <p>
-        这里按当前设计列出所有 actor 或 actor-like role。关键约束是：同一张物理 GPU 不能同时存在两个都声明 <code>num_gpus=1</code> 的 Ray actor。
-        <code>TrainerRank</code> 和 <code>RolloutWorker</code> 可以先实现为 <code>GpuSlotActor</code> 内部对象，也可以是 slot 托管的轻量 child actor，但不应再申请独立 GPU token。
+        这里按当前设计列出所有 actor 或 actor-like role。关键约束是：rollout 和 trainer execution actors 是独立故障域，集合内部 GPU 不重复，集合之间可以通过 <code>shared_gpus</code> overlap。
+        长生命周期 rollout/train actor 不用 Ray <code>num_gpus=1</code> 表达互斥，而是用 role-scoped logical resources 加 <code>GpuLeaseManagerActor</code> lease gate。
+        dry-run 会输出 <code>ray_launch_plan</code>：其中 <code>node_custom_resources</code> 同时声明 shared GPU 的 <code>rollout_gpu_i</code> 与 <code>train_gpu_i</code>，actor specs 保持 <code>num_gpus=0</code>。
       </p>
       <table>
         <thead>
@@ -776,38 +780,44 @@
           <tr>
             <td><code>ControllerActor</code></td>
             <td>CPU actor</td>
-            <td>训练主循环、模式 FSM、slot 编排、train trigger、背压和恢复策略。</td>
-            <td>创建并调用 slot、coordinator、queue、registry、metrics；把异常归一化为 health event。</td>
+            <td>训练主循环、模式 FSM、GPU lease 编排、train trigger、背压和恢复策略。</td>
+            <td>创建并调用 lease manager、rollout manager、trainer coordinator、queue、registry、metrics；把异常归一化为 health event。</td>
           </tr>
           <tr>
-            <td><code>GpuSlotActor</code></td>
-            <td><code>num_gpus=1</code> heavy actor</td>
-            <td>一张物理 GPU 的唯一 owner；管理 rollout/train role 生命周期、CUDA device、active role、toggle 和失败状态。</td>
-            <td>接受 Controller/coordinator 的 phase request；托管 <code>RolloutWorker</code> 和/或 <code>TrainerRank</code> role；上报 Metrics。</td>
-          </tr>
-          <tr>
-            <td><code>RolloutCoordinatorActor</code></td>
+            <td><code>GpuLeaseManagerActor</code></td>
             <td>CPU actor</td>
-            <td>prompt 分发、worker 选择、target policy version 选择、in-flight 跟踪、queue 背压响应、全局权重切换暂停。</td>
-            <td>读 <code>WeightRegistryActor</code>，调用 slot-hosted rollout role，向 <code>SampleQueueActor</code> 提交样本 metadata/ref。</td>
+            <td>每张物理 GPU 的 active role、holder、lease epoch、失败状态和 fail-fast CUDA gate。</td>
+            <td>接受 Controller/manager/coordinator 的 lease request；拒绝 rollout-only GPU 上的 trainer lease；上报 Metrics。</td>
           </tr>
           <tr>
-            <td><code>RolloutWorker</code> role</td>
-            <td>slot 内 GPU role；不独立申请 GPU token</td>
-            <td>运行 vLLM engine，激活权重，生成 response/tokens/old logprobs，drain in-flight，释放 KV cache/CUDA residency。</td>
-            <td>被 <code>GpuSlotActor</code> gate；接收 <code>RolloutCoordinatorActor</code> 请求；调用 reward 或提交 sample refs。</td>
+            <td><code>RolloutManagerActor</code></td>
+            <td>CPU actor</td>
+            <td>全局 rollout 生命周期、input backlog、replica 选择、target policy version、in-flight 跟踪、queue 背压响应、全局权重切换暂停。</td>
+            <td>接收 dataloader prompts；在 output queue 未到 high watermark 且 replica 有 in-flight capacity 时持续 pump rollout；读 <code>WeightRegistryActor</code> 并调用 rollout replica controllers。</td>
+          </tr>
+          <tr>
+            <td><code>RolloutReplicaControllerActor</code></td>
+            <td>CPU actor</td>
+            <td>每个 rollout DP replica 一个；管理 vLLM TP group、权重激活、drain/offload/wake 和 replica failure。</td>
+            <td>接收 <code>RolloutManagerActor</code> 请求；协调多个 TP workers；以 replica 为单位 ack activation。</td>
+          </tr>
+          <tr>
+            <td><code>RolloutWorkerActor</code></td>
+            <td>logical rollout GPU resource</td>
+            <td>每个 vLLM TP rank 一个；运行 vLLM worker/shard，维护 KV cache、CUDA residency、TP rank 状态。</td>
+            <td>执行 CUDA 前校验 rollout lease；生成 tokens/logprobs；调用 reward 或提交 sample refs。</td>
           </tr>
           <tr>
             <td><code>TrainerCoordinatorActor</code></td>
             <td>CPU actor</td>
-            <td>汇总 train-capable hybrid slots，管理 rank mapping、world size、group_epoch、train window、batch reservation 与错误归一化。</td>
-            <td>从 <code>SampleQueueActor</code> reserve/ack/release batch；协调 <code>TrainerRank</code> roles；rank0/export 后注册权重。</td>
+            <td>汇总自动分配到 <code>shared_gpus</code> 的 trainer ranks，管理 rank mapping、world size、group_epoch、train window、batch reservation 与错误归一化。</td>
+            <td>从 <code>SampleQueueActor</code> reserve/ack/release batch；协调 <code>TrainerRankActor</code>；rank0/export 后注册权重。</td>
           </tr>
           <tr>
-            <td><code>TrainerRank</code> role</td>
-            <td>slot 内 GPU role；不独立申请 GPU token</td>
+            <td><code>TrainerRankActor</code></td>
+            <td>logical train GPU resource</td>
             <td>FSDP2 rank，管理 model shard、optimizer/scheduler/RNG/scaler，执行 micro-batch forward/backward、optimizer step、checkpoint shard。</td>
-            <td>被 <code>GpuSlotActor</code> gate；由 <code>TrainerCoordinatorActor</code> 下发 rendezvous 和 batch refs；rank0/exporter 产出权重。</td>
+            <td>执行 CUDA 前校验 trainer lease；由 <code>TrainerCoordinatorActor</code> 下发 rendezvous 和 batch refs；rank0/exporter 产出权重。</td>
           </tr>
           <tr>
             <td><code>SampleQueueActor</code></td>
@@ -834,10 +844,10 @@
             <td>接收所有 actor/role 的事件；供 Controller 判断 degraded、paused、recovery。</td>
           </tr>
           <tr>
-            <td><code>RolloutGroupActor</code>（未来条件）</td>
-            <td>CPU/group coordinator；slot 仍持 GPU token</td>
-            <td>当 vLLM <code>tensor_parallel_size &gt; 1</code> 时，以 group 为单位管理 TP 通信、sleep/wake/offload 和失败恢复。</td>
-            <td>聚合多个 <code>GpuSlotActor</code>；对 <code>RolloutCoordinatorActor</code> 暴露一个 logical worker。v0.1 默认不启用。</td>
+            <td><code>RolloutReplicaControllerActor</code> TP path</td>
+            <td>CPU group coordinator</td>
+            <td>当 vLLM <code>tensor_parallel_size &gt; 1</code> 时，以 replica 为单位管理 TP 通信、sleep/wake/offload 和失败恢复。</td>
+            <td>聚合多个 <code>RolloutWorkerActor</code>；对 <code>RolloutManagerActor</code> 暴露一个 logical rollout endpoint。</td>
           </tr>
         </tbody>
       </table>
@@ -848,11 +858,11 @@
       <div class="grid-2">
         <div class="box">
           <h3><code>SampleRecord</code></h3>
-          <p>必须包含 <code>sample_id</code>、<code>policy_version</code>、prompt、response、tokens、logprobs、reward。扩展字段包括 <code>request_id</code>、<code>weight_checksum</code>、finish reason、TTL、token counts、old logprobs 和 worker metadata。</p>
+          <p>必须包含 <code>sample_id</code>、<code>policy_version</code>、prompt、response、tokens、logprobs、reward。扩展字段包括 <code>request_id</code>、<code>weight_checksum</code>、finish reason、TTL、token counts、old logprobs、worker metadata；partial rollout 样本还要带 token span 级 <code>policy_segments</code>。</p>
         </div>
         <div class="box">
           <h3><code>WeightMeta</code></h3>
-          <p>必须包含 <code>version_id</code>、创建时间、source type、model URI、format 和 checksum。artifact 来源只接受 <code>hdfs_uri</code> 或 <code>hdfs_fuse_path</code>，不把大权重经 Ray object store 广播。</p>
+          <p>必须包含 <code>version_id</code>、创建时间、model path、format 和 checksum。模型与 checkpoint path 不要求声明 source type；大权重不经 Ray object store 广播。</p>
         </div>
         <div class="box">
           <h3><code>TrainBatch</code></h3>
@@ -860,11 +870,11 @@
         </div>
         <div class="box">
           <h3>Health events</h3>
-          <p>最小事件集覆盖 rollout stale weight、queue backpressure、sample TTL/policy lag drop、trainer OOM、weight distribution failure、hybrid toggle timeout、comm group rebuild 和 object store pressure。</p>
+          <p>最小事件集覆盖 rollout stale weight、queue backpressure、sample TTL/policy lag drop、trainer OOM、weight distribution failure、shared GPU toggle timeout、comm group rebuild 和 object store pressure。</p>
         </div>
       </div>
 
-      <h3>Hybrid slot toggle 状态</h3>
+      <h3>Shared GPU lease toggle 状态</h3>
       <div class="pill-row">
         <span class="pill">ROLLOUT_ACTIVE</span>
         <span class="pill">ROLLOUT_DRAINING</span>
@@ -879,19 +889,21 @@
       </div>
       <p>
         正常 toggle 不销毁 FSDP2 process group。通信组生命周期长于一次 train window，rank mapping 和 rendezvous metadata 保持稳定；
-        只有 slot/rank failure、NCCL error、作业恢复或 shutdown 才 rebuild，并生成新的 <code>comm_epoch</code>。
+        只有 GPU/rank failure、NCCL error、作业恢复或 shutdown 才 rebuild，并生成新的 <code>comm_epoch</code>。
+        <code>rollout_only_gpus</code> 不允许获得 trainer lease。
       </p>
     </section>
 
     <section id="risks">
       <h2>关键约束与风险</h2>
       <ul>
-        <li><strong>GPU ownership：</strong><code>GpuSlotActor</code> 是唯一申请 <code>num_gpus=1</code> 的 actor。role 绕过 slot owner 执行 CUDA 会破坏 hybrid 安全性。</li>
+        <li><strong>GPU lease：</strong><code>GpuLeaseManagerActor</code> 是 active-role source of truth。role 绕过 lease token 执行 CUDA 会破坏互斥。</li>
+        <li><strong>Topology gate：</strong><code>rollout_only_gpus</code> 表示只支持 rollout lease；这类 GPU 的 trainer lease 请求必须返回 unsupported role。</li>
         <li><strong>bounded staleness：</strong><code>standalone_hybrid</code> 允许旧权重样本，但必须受 <code>max_policy_lag</code>、TTL、drop/degrade 策略约束，不能演化成无界 async。</li>
-        <li><strong>权重状态：</strong><code>REGISTERED</code> 只代表 artifact 可用，不代表 rollout 已经服务该版本。全局恢复 prompt 前必须收齐 activation ack。</li>
+        <li><strong>权重状态：</strong><code>REGISTERED</code> 只代表 artifact 可用，不代表 rollout 已经服务该版本。全局恢复 prompt 前必须在当前 rollout lease epoch 下收齐 activation ack；激活失败的目标版本必须标记为 <code>FAILED</code>。</li>
         <li><strong>queue ack：</strong>trainer 失败时不能丢样本。queue ack 必须在 optimizer step 成功之后；失败路径 release reservation 或标记不可重试。</li>
         <li><strong>process group：</strong>高频 toggle 不应 destroy/reinit FSDP2 process group，否则正常调度路径会变成容易 deadlock 的路径。</li>
-        <li><strong>v0.1 范围：</strong>不加入多机 Ray、Kubernetes、Slurm、SSH launcher，也不支持 rollout TP &gt; 1，除非重新打开设计。</li>
+        <li><strong>v0.1 范围：</strong>不加入多机 Ray、Kubernetes、Slurm、SSH launcher；rollout TP 通过 <code>RolloutReplicaControllerActor</code> 管理，不能让 TP group 横跨 rollout-only/shared 生命周期区域。</li>
       </ul>
     </section>
 
@@ -902,7 +914,7 @@
         <li><a href="../../README.md"><code>README.md</code></a>：项目定位和文档索引。</li>
         <li><a href="../../plan-design.md"><code>plan-design.md</code></a>：主架构、actor、模式、协议、调度、故障恢复。</li>
         <li><a href="../../ref-flashrl-design.md"><code>ref-flashrl-design.md</code></a>：FlashRL 参考抽取。</li>
-        <li><a href="mode-fsm.md"><code>docs/architecture/mode-fsm.md</code></a>：mode normalization 和 hybrid toggle FSM。</li>
+        <li><a href="mode-fsm.md"><code>docs/architecture/mode-fsm.md</code></a>：mode normalization 和 shared GPU lease FSM。</li>
         <li><a href="../protocols/runtime-config.schema.yaml"><code>docs/protocols/runtime-config.schema.yaml</code></a>：runtime config schema。</li>
         <li><a href="../protocols/sample-record.schema.yaml"><code>docs/protocols/sample-record.schema.yaml</code></a>：sample record schema。</li>
         <li><a href="../protocols/weight-meta.schema.yaml"><code>docs/protocols/weight-meta.schema.yaml</code></a>：weight metadata schema。</li>

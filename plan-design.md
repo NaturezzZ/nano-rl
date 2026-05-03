@@ -30,7 +30,7 @@
 - 不覆盖所有 RL 算法，仅先支持 PPO-like on-policy 主路径；
 - 不实现复杂多租户调度；
 - v0.1 不实现多机、K8s/Slurm/SSH adapter；Ray local runtime 是默认且唯一的执行层；
-- 不把 Ray 当作权重仓库：大模型权重仍通过 checkpoint/artifact URI 传递，Ray 只传控制消息、样本引用和状态。
+- 不把 Ray 当作权重仓库：大模型权重仍通过 checkpoint/artifact path 传递，Ray 只传控制消息、样本引用和状态。
 
 ---
 
@@ -43,9 +43,10 @@
                              |
                              v
 +------------------------ Ray Resource Plane -------------------------+
-| GpuSlotActor[gpu] owns one local physical GPU slot                 |
-|   rollout_only -> RolloutWorker role                               |
-|   hybrid       -> RolloutWorker role + TrainerRank role, toggled    |
+| GpuLeaseManagerActor owns physical GPU active-role leases           |
+|   user YAML provides counts only; LaunchConfig expands gpu_plan      |
+|   rollout and trainer actor sets may overlap on shared_gpus          |
+|   role actors use logical Ray resources + lease epoch CUDA gates     |
 +----------------------------+----------------------------------------+
                              |
                              v
@@ -62,9 +63,9 @@
 2. **Ray Driver**：初始化 Ray runtime、校验资源、创建 `ControllerActor`；
 3. **ControllerActor**：唯一 loop 语义源，统一驱动 train-step/rollout-step；
 4. **Mode FSM**：模式状态机（fully sync、standalone hybrid、degraded）；
-5. **GpuSlotActor**：一张物理 GPU 一个资源管理 actor，负责该 GPU 上 rollout/train role 的生命周期和 toggle；
-6. **TrainerGroup (logical FSDP2 ranks)**：由多个 slot 暴露的 `TrainerRank` role 组成，负责参数更新、梯度同步、checkpoint；
-7. **RolloutActorPool (logical vLLM workers)**：由多个 slot 暴露的 `RolloutWorker` role 组成，负责生成、logprob、批量推理；
+5. **GpuLeaseManagerActor**：CPU actor，负责物理 GPU 的 active role、lease epoch、失败状态和 CUDA gate；
+6. **TrainerGroup (logical FSDP2 ranks)**：由自动分配到 `shared_gpus` 的 `TrainerRankActor` 组成，负责参数更新、梯度同步、checkpoint；
+7. **RolloutManager / RolloutReplicaController / RolloutWorkerActor**：全局 rollout 生命周期、每个 DP replica 的 TP group 控制，以及实际 vLLM GPU worker；
 8. **RewardActorPool**：reward 计算与可插拔 reward function；
 9. **WeightRegistryActor**：权重版本注册、激活、健康状态；
 10. **SampleQueueActor**：样本传输与背压（trajectory、token-level stats）；
@@ -75,53 +76,131 @@
 Ray 不是外部 adapter，而是 nano-rl v0.1 的执行模型：
 
 1. `Driver` 调用 `ray.init(...)`，创建 placement groups，然后启动 `ControllerActor`；
-2. `ControllerActor` 在单机 Ray runtime 内创建每张 GPU 对应的 `GpuSlotActor`，slot actor 使用 `num_gpus=1` 占住真实 GPU token；
-3. `GpuSlotActor` 按 slot mode 初始化 `RolloutWorker` role、`TrainerRank` role 或二者的 hybrid 状态；
-4. `TrainerGroup` 是多个 slot 上 `TrainerRank` role 的逻辑集合，rank 激活后加入同一个 FSDP2 process group；
-5. `RolloutActorPool` 是多个 slot 上 `RolloutWorker` role 的逻辑集合，每个 active rollout role 负责一个 vLLM engine 或 engine shard；
+2. `ControllerActor` 在单机 Ray runtime 内创建 CPU-only `GpuLeaseManagerActor`，并按 resolved `gpu_plan` 创建 rollout/trainer actor；
+3. `gpu_plan` 由数量自动展开：用户只写 `rollout_only_gpus`、`shared_gpus`、rollout DP/TP 和 trainer rank 数，不手写物理 GPU id；
+4. `TrainerGroup` 是多个 `TrainerRankActor` 的逻辑集合，rank 映射到 `shared_gpus`，激活后加入同一个 FSDP2 process group；
+5. `RolloutManagerActor` 管理多个 `RolloutReplicaControllerActor`；每个 DP replica controller 管理一个 vLLM TP group 和若干 `RolloutWorkerActor`；
 6. `RewardActorPool` 与 `SampleQueueActor` 通过 Ray ObjectRef 传输样本批次；
-7. 大权重不通过 Ray object store 广播，`TrainerRank(rank=0)` 发布 `WeightMeta(model_uri=...)`，rollout role 按 URI 拉取或激活。
+7. 大权重不通过 Ray object store 广播，`TrainerRank(rank=0)` 发布 `WeightMeta(model_path=...)`，rollout role 按 path 拉取或激活。
 
 这样做的目标是让启动、路由、故障感知都留在 Ray 内部完成，同时避免把模型权重这种大对象错误地塞进 Ray object store。
 
-### 2.3 Ray actor 类型与 GPU slot
+### 2.3 Ray actor 类型与 GPU lease
 
-v0.1 采用“每张 GPU 一个 `GpuSlotActor`”的资源模型。`GpuSlotActor` 是唯一真正申请 Ray GPU 资源的重 actor；其下的 rollout/train role 可以先实现为 slot 内部对象、子进程，或不再申请 GPU 的轻量 Ray child actor。无论实现形态如何，都必须由 `GpuSlotActor` 统一分配 CUDA device、生命周期和 active role。
+v0.1 采用“数量配置、自动分配、lease gate”的 GPU 资源模型。用户 YAML 不手写物理 GPU id，只提供本机 GPU 总数、`rollout_only_gpus`、`shared_gpus`、rollout DP/TP 和 trainer rank 数。`LaunchConfig` 将这些数量确定性展开为 `ResolvedGpuPlan`，用于 dry-run、日志、actor 创建和故障定位。
+
+`rollout_only_gpus` 与 `shared_gpus` 是物理 GPU 生命周期区域，不是用户手写的 GPU id：
+
+```yaml
+runtime:
+  local:
+    num_gpus: 8
+  ray:
+    gpu_manager:
+      lease_manager: true
+      topology:
+        rollout_only_gpus: 4
+        shared_gpus: 4
+        idle_gpus: 0
+    placement:
+      trainer:
+        num_ranks: 4
+        gpus_per_rank: 1
+      rollout:
+        num_replicas: 4
+        gpus_per_replica: 2
+        tensor_parallel_size: 2
+```
+
+该配置会自动展开为：
+
+```yaml
+resolved_gpu_plan:
+  rollout_only_gpu_ids: [0, 1, 2, 3]
+  shared_gpu_ids: [4, 5, 6, 7]
+  rollout_replicas:
+    - replica_id: rollout-dp-0
+      gpu_ids: [0, 1]
+    - replica_id: rollout-dp-1
+      gpu_ids: [2, 3]
+    - replica_id: rollout-dp-2
+      gpu_ids: [4, 5]
+    - replica_id: rollout-dp-3
+      gpu_ids: [6, 7]
+  trainer_ranks:
+    - rank: 0
+      gpu_id: 4
+    - rank: 1
+      gpu_id: 5
+    - rank: 2
+      gpu_id: 6
+    - rank: 3
+      gpu_id: 7
+```
+
+分配规则：
+
+- 可见 GPU 集合来自 `runtime.local.num_gpus`、`CUDA_VISIBLE_DEVICES` 或 Ray node inventory；v0.1 的本地 core 用 `0..num_gpus-1` 做 deterministic dry-run；
+- 前 `rollout_only_gpus` 张卡只给 rollout actor set；
+- 接下来的 `shared_gpus` 张卡同时进入 rollout actor set 和 trainer actor set，两个 set 之间允许重叠；
+- rollout actor set 内部 GPU 不重复，trainer actor set 内部 GPU 不重复；
+- `rollout_only_gpus` 和 `shared_gpus` 都必须能被 rollout `tensor_parallel_size` 整除，避免一个 vLLM TP group 横跨两种生命周期区域。
+
+长生命周期 rollout/trainer execution actors 不应通过 Ray `num_gpus=1` 表达 GPU 资源。Ray 不理解“rollout 和 trainer 在时间上互斥但 actor 同时存活”，如果两组 actor 都申请 `num_gpus=1`，会把 overlap 误判成需要额外 GPU token。推荐用 role-scoped custom resources 表达集合内唯一性：
+
+```text
+RolloutWorkerActor(num_gpus=0, resources={"rollout_gpu_4": 1})
+TrainerRankActor(num_gpus=0, resources={"train_gpu_4": 1})
+```
+
+`rollout_gpu_4` 与 `train_gpu_4` 是两个逻辑资源，允许对应同一张物理 GPU。真正的跨 role 互斥由 CPU-only `GpuLeaseManagerActor` 执行。所有会执行 CUDA 的方法都必须携带并校验 `(gpu_id, role, holder_id, lease_epoch)`；这包括 `generate`、`train_step`、`activate_weight`、hydrate/offload 后的 wake 等会改变 GPU residency 的路径。
+
+实现上先生成一个 `RayLaunchPlan`，把 node custom resources 和 actor specs 明确展开：
+
+- `node_custom_resources` 为 rollout actor set 声明 `rollout_gpu_i`，为 trainer actor set 声明 `train_gpu_i`；
+- `RolloutWorkerActor` 使用 `num_gpus=0, resources={"rollout_gpu_i": 1}`；
+- `TrainerRankActor` 使用 `num_gpus=0, resources={"train_gpu_i": 1}`；
+- `shared_gpus` 对应的同一个 `gpu_id` 会同时出现 `rollout_gpu_i` 与 `train_gpu_i`，但没有任何长生命周期 actor 申请 Ray `num_gpus=1`；
+- dry-run 输出 `ray_launch_plan`，用于检查 actor placement、resource inventory、constructor args 和 GPU overlap 是否符合预期。
 
 | Actor | Ray 资源 | 主要职责 |
 | --- | --- | --- |
-| `ControllerActor` | CPU | 训练主循环、模式状态机、slot 编排、故障恢复 |
-| `GpuSlotActor` | `num_gpus=1` | 独占一张物理 GPU，管理本 slot 的 rollout/train role 状态 |
-| `RolloutWorker` role | slot 内 GPU | vLLM engine、权重激活、生成、logprob、rollout drain |
-| `TrainerRank` role | slot 内 GPU | FSDP2 rank、train step、梯度同步、checkpoint shard |
-| `TrainerCoordinatorActor` | CPU | 汇总 train-capable slots，建立 rank/world size，调度 train window |
-| `RolloutCoordinatorActor` | CPU | 汇总 rollout-capable slots，做 prompt 分发、批次合并和全局暂停式权重切换 |
+| `ControllerActor` | CPU | 训练主循环、模式状态机、train trigger、背压和恢复策略 |
+| `GpuLeaseManagerActor` | CPU | 物理 GPU active role、lease epoch、holder、失败状态与 fail-fast gate |
+| `RolloutManagerActor` | CPU | rollout 生命周期、input backlog、queue 水位、权重同步、train/rollout 切换协同 |
+| `RolloutReplicaControllerActor` | CPU | 每个 rollout DP replica 一个；管理 vLLM TP group、权重激活、drain/offload/wake 和 replica 失败 |
+| `RolloutWorkerActor` | logical rollout GPU resource | 每个 vLLM TP rank 一个；运行 vLLM worker/shard、维护 KV cache/CUDA residency |
+| `TrainerCoordinatorActor` | CPU | 汇总 trainer ranks，建立 rank/world size，调度 train window |
+| `TrainerRankActor` | logical train GPU resource | FSDP2 rank、train step、梯度同步、checkpoint shard |
 | `SampleQueueActor` | CPU | 样本队列、TTL、policy lag guard、ObjectRef 背压 |
 | `WeightRegistryActor` | CPU | 权重版本、激活状态、rollback 标记 |
 | `MetricsActor` | CPU | 指标、事件、health trace |
 
-不要在同一张 GPU 上创建两个都声明 `num_gpus=1` 的 Ray actor。Hybrid slot 需要两个 role 的状态，但只能有一个 active role 拥有 CUDA 执行权。
+### 2.4 GPU topology 与 role 状态
 
-### 2.4 Slot 模式
+每个物理 GPU 的 lease 状态包括：
 
-每个 `GpuSlotActor` 启动时带一个不可变 `slot_mode`：
+- `gpu_id`：resolved plan 展开的物理 GPU id；
+- `topology`：`rollout_only`、`shared` 或 `idle`；
+- `active_role`：`rollout`、`trainer` 或 `None`；
+- `holder_id`：当前 lease 持有者，例如 `rollout-dp-2-tp-0` 或 `trainer-rank-0`；
+- `lease_epoch`：每次 active role 或 holder 变化时递增；
+- `failed_reason`：GPU 或 actor 组失败时的结构化原因。
 
-- `rollout_only`：standalone rollout GPU，只管理一个 `RolloutWorker` role；不参与 FSDP2 rank；
-- `hybrid`：同一张 GPU 同时配置 rollout/train 两个 role 的状态，但通过 toggle 保证同一时刻只有一个 role active；
-- `idle`：预留 GPU，v0.1 可选，用于 dry-run、扩缩容或故障替补。
+因此，`rollout_only` 表示只支持 rollout lease；`shared` 表示支持 rollout/trainer 两种 lease，但任意时刻只能有一个 role active；`idle` 表示预留 GPU，不参与 v0.1 默认执行。
 
 每个 role 的局部状态：
 
-- `ABSENT`：该 slot 不支持这个 role；
+- `ABSENT`：该 GPU / replica 不支持这个 role；
 - `INIT`：正在构建 runtime；
 - `READY`：已初始化但未占用 CUDA 执行窗口；
 - `ACTIVE`：当前 role 可以发起 CUDA kernel；
 - `DRAINING`：停止接新请求，等待 in-flight batch 结束；
 - `PAUSED`：保留必要元数据，不允许执行；
 - `UNLOADED`：已释放 CUDA memory，仅保留恢复所需 metadata；
-- `FAILED`：role 失效，需要 slot 或 group 级恢复。
+- `FAILED`：role 失效，需要 GPU、replica 或 group 级恢复。
 
-Hybrid slot 的 active 状态只允许：
+只有 shared GPU 才允许进入完整 toggle 状态：
 
 - `ROLLOUT_ACTIVE`
 - `ROLLOUT_DRAINING`
@@ -138,28 +217,30 @@ Hybrid slot 的 active 状态只允许：
 
 ### 2.5 Toggle 语义
 
-`ControllerActor` 不直接向 hybrid slot 内的 inactive role 发请求。所有切换必须经过 `GpuSlotActor.toggle(target_role)`：
+`ControllerActor` 不直接向 inactive role 发 CUDA 请求。所有共享 GPU 的切换必须经过 `GpuLeaseManagerActor` 和对应 role actor 的 drain/offload/hydrate 协议。`GpuLeaseManagerActor` 首先检查 topology：当 GPU 属于 `rollout_only` 时，授予 trainer lease 必须立即返回 `GpuRoleUnsupported(role=trainer)`，不能等待未来变成 shared GPU。
 
 1. `rollout -> train`：
-   - 只切换 `hybrid` slots；`rollout_only` slots 继续接收 prompt 并持续 rollout；
-   - hybrid slot 内的 `RolloutWorker` 停止接新 prompt；
+   - 只切换 `shared_gpus` 对应的 rollout replicas；`rollout_only_gpus` 对应的 replicas 继续接收 prompt 并持续 rollout；
+   - `RolloutManagerActor` 停止向会占用 shared GPUs 的 replicas 发新 prompt；
    - 等待 in-flight generation 完成或超时取消；
    - flush 已完成样本到 `SampleQueueActor`；
    - 释放 vLLM KV cache 和 rollout CUDA memory；
-   - `TrainerRank` 加载/恢复训练状态；
-   - 所有 train-capable slots 到达 train barrier 后，`TrainerCoordinatorActor` 开始一个 train window。
+   - `GpuLeaseManagerActor` 将 shared GPUs 的 lease 授予对应 `TrainerRankActor`；
+   - `TrainerRankActor` 加载/恢复训练状态；
+   - 所有 trainer ranks 到达 train barrier 后，`TrainerCoordinatorActor` 开始一个 train window。
 2. `train -> rollout`：
-   - `TrainerRank` 完成当前 micro-step 或在安全点暂停；
+   - `TrainerRankActor` 完成当前 micro-step 或在安全点暂停；
    - rank0 发布 `WeightMeta`；
    - 释放训练临时 CUDA memory；
-   - `RolloutWorker` 激活目标权重版本；
-   - rollout-capable slots 到达 rollout barrier 后，`RolloutCoordinatorActor` 恢复发 prompt。
+   - `GpuLeaseManagerActor` 将 shared GPUs 的 lease 归还给对应 rollout workers；
+   - `RolloutReplicaControllerActor` 激活目标权重版本并唤醒 TP group；
+   - rollout replicas 到达 rollout barrier 后，`RolloutManagerActor` 恢复发 prompt。
 
-如果任一 slot toggle 失败，整个相关 group 进入 `PAUSED` 或 `DEGRADED_SYNC`，不能让部分 FSDP ranks 继续训练。
+如果任一 shared GPU lease 切换、rollout offload、trainer hydrate 或 barrier 失败，整个相关 trainer group 或 rollout replica 进入 `PAUSED` / `DEGRADED_SYNC`，不能让部分 FSDP ranks 或部分 TP ranks 继续推进。
 
 #### 2.5.1 Role residency 与 offload 边界
 
-`swap_on_toggle` 的语义不是销毁 role，而是切换同一张 GPU 上两个 role 的 **residency** 与 **CUDA 执行权**。Hybrid slot 内始终只有一个 role 可以处于 GPU-active，另一个 role 必须处于 CPU standby 或 unloaded metadata standby。
+`swap_on_toggle` 的语义不是销毁 role actor，而是切换同一张 shared GPU 上两个独立 role actor 的 **residency** 与 **CUDA 执行权**。Shared GPU 内始终只有一个 role 可以处于 GPU-active，另一个 role 必须处于 CPU standby 或 unloaded metadata standby。
 
 | Window | Rollout role | Trainer role | 通信组状态 |
 | --- | --- | --- | --- |
@@ -171,7 +252,7 @@ Hybrid slot 的 active 状态只允许：
 | `TRAIN_ACTIVE` | rollout role 不允许执行 CUDA kernel | model shard 与 optimizer state 在 GPU，所有 rank 进入同一 FSDP2 train window | trainer process group active，collective 顺序由 `TrainerCoordinatorActor` 控制 |
 | `TRAIN_DRAINING` | 保持 paused | 完成当前 micro-step，等待 async work，进入 train exit barrier | 所有 rank 一起退出 train window |
 | `TRAIN_OFFLOADING_CPU` | 准备 wake/reload 目标 `WeightMeta` | model shard 与 optimizer state offload 到 CPU standby，释放 CUDA tensors/cache | trainer process group 保持存活但 idle |
-| `ROLLOUT_WAKING_GPU` | vLLM wake/load 新权重，重建 KV cache 预算 | CPU standby | rollout-capable slots 到达 rollout barrier 后恢复 prompt |
+| `ROLLOUT_WAKING_GPU` | vLLM wake/load 新权重，重建 KV cache 预算 | CPU standby | rollout replicas 到达 rollout barrier 后恢复 prompt |
 | `ROLLOUT_READY_BARRIER` | rollout role 已加载目标版本 | trainer 保持 CPU standby | rollout barrier 完成后恢复 prompt |
 
 训练侧 CPU standby 必须保存一个 rank-local `TrainStateBundle`：
@@ -193,43 +274,43 @@ FSDP2 通信组与 GPU residency 解耦。`TrainerCoordinatorActor` 在 bootstra
 通信组保护规则：
 
 - 所有 FSDP/NCCL collective 只允许发生在 `TRAIN_ACTIVE` 或受控的 train enter/exit barrier 中；
-- 进入 train 前，所有 hybrid slots 必须先完成 rollout offload，再一起 hydrate trainer state；
+- 进入 train 前，所有 shared GPU 上的 rollout replicas 必须先完成 rollout offload，再一起 hydrate trainer state；
 - 退出 train 前，所有 rank 必须完成 optimizer step、等待 async work、进入 barrier，然后才能 offload CUDA tensors；
 - 任何 rank hydrate/offload 失败时，本轮 train window fail-fast，整个 `TrainerGroup` 进入 `PAUSED` 或整体 rebuild，不能让健康 rank 单独继续；
-- process group rebuild 只允许发生在 slot/rank 失败、NCCL error、作业恢复或 shutdown 路径中；rebuild 必须使用 Ray control-plane 做 torch.distributed 之外的 out-of-band rendezvous，生成新的 `comm_epoch`，并让旧 epoch 的 pending train batch 全部失效；
-- vLLM tensor-parallel/pipeline-parallel 通信资源属于 rollout backend 私有资源。v0.1 默认 `tensor_parallel_size=1`；未来若 rollout TP > 1，必须由 `RolloutGroupActor` 以 group 为单位 sleep/wake/offload，不能把 rollout 通信组和 FSDP2 trainer process group 混用。
+- process group rebuild 只允许发生在 GPU/rank 失败、NCCL error、作业恢复或 shutdown 路径中；rebuild 必须使用 Ray control-plane 做 torch.distributed 之外的 out-of-band rendezvous，生成新的 `comm_epoch`，并让旧 epoch 的 pending train batch 全部失效；
+- vLLM tensor-parallel/pipeline-parallel 通信资源属于 rollout backend 私有资源。每个 `RolloutReplicaControllerActor` 管理一个 DP replica 的 TP group，sleep/wake/offload、activation 和失败都以 replica 为单位处理，不能把 rollout 通信组和 FSDP2 trainer process group 混用。
 
 这条约束的工程原因是：`destroy_process_group()` 需要所有 ranks 以一致顺序执行，运行中 destroy/reinit 还需要 torch.distributed 之外的同步；把它绑到高频 role toggle 上会把正常调度路径变成最容易 deadlock 的路径。因此 normal toggle 保持 process group 活着，只释放 CUDA tensor residency。
 
-保留 process group 可能仍会留下少量 CUDA context/NCCL bookkeeping 显存；设计目标是释放 model weights、optimizer state、activation/KV cache 等大块 residency，而不是追求完全 0 MiB。`cuda_quiesce_timeout_sec` 之后如果 residual GPU memory 超过预算，slot 必须上报 `HYBRID_STATE_OFFLOAD_FAILED`，由 controller 暂停或整组 rebuild。
+保留 process group 可能仍会留下少量 CUDA context/NCCL bookkeeping 显存；设计目标是释放 model weights、optimizer state、activation/KV cache 等大块 residency，而不是追求完全 0 MiB。`cuda_quiesce_timeout_sec` 之后如果 residual GPU memory 超过预算，相关 GPU/replica 必须上报 `SHARED_GPU_OFFLOAD_FAILED`，由 controller 暂停或整组 rebuild。
 
 #### 2.5.3 Collocated 与 disaggregated 的差异
 
-`collocated` 归一化为 `fully_sync` 后，所有 GPU 都是 `hybrid`。每个 iteration 都是全局相位切换：全体 slots rollout -> 全体 slots offload rollout -> 全体 ranks hydrate train -> train -> 全体 ranks offload train -> 全体 rollout wake。此模式下 `max_policy_lag=0`，没有 standalone rollout 继续采旧权重。
+`collocated` 归一化为 `fully_sync` 后，`rollout_only_gpus=0`，所有 rollout GPU 都在 shared pool 内。每个 iteration 都是全局相位切换：全部 rollout replicas drain/offload -> 全体 ranks hydrate train -> train -> 全体 ranks offload -> 全部 rollout replicas wake。此模式下 `max_policy_lag=0`，没有 standalone rollout 继续采旧权重。
 
-`disaggregated` 归一化为 `standalone_hybrid` 后，只有 `hybrid` slots 进入上述切换；`rollout_only` slots 不进入 train barrier，继续用受控旧权重采样。训练窗口期间 `SampleQueueActor` 必须按 `policy_version`、TTL 和 queue 水位过滤样本；新权重发布后，`rollout_only` 与返回 rollout 的 hybrid slots 一起进入全局暂停式 partial rollout 权重切换，到达同一个目标版本后再恢复发 prompt。
+`disaggregated` 归一化为 `standalone_hybrid` 后，只有 shared GPUs 对应的 rollout replicas 进入上述切换；rollout-only GPUs 不进入 train barrier，继续用受控旧权重采样。训练窗口期间 `SampleQueueActor` 必须按 `policy_version`、TTL 和 queue 水位过滤样本；新权重发布后，所有 rollout replicas 一起进入全局暂停式权重切换，到达同一个目标版本后再恢复发 prompt。
 
 ### 2.6 `main.py` 启动入口与 YAML 配置
 
 仓库根目录必须保留一个用户可见的启动入口，但启动入口只消费完整 YAML 配置，不把训练参数拆成一行行命令参数。
 
-YAML 是训练配置的主入口。本机 GPU slot 分配、并行维度、模型、数据、训练超参、collocated/disaggregated 部署形态与控制阈值都应写在 YAML 中。`main.py` 不应该为每个训练字段都增加同名命令行参数，避免出现“YAML 一套、命令一套”的双配置系统。
+YAML 是训练配置的主入口。本机 GPU 数量、GPU pool 数量、并行维度、模型、数据、训练超参、collocated/disaggregated 部署形态与控制阈值都应写在 YAML 中。具体物理 `gpu_id` 由系统在 resolved config 中展开，`main.py` 不应该为每个训练字段都增加同名命令行参数，避免出现“YAML 一套、命令一套”的双配置系统。
 
 `main.py` 只承担用户入口职责，不直接承载训练循环。它应完成：
 
 1. 读取 YAML config；
 2. 读取 YAML 中的 `run.intent`，决定执行 `train`、`dry_run` 或 `validate`；
 3. 将配置中的用户部署形态归一化，例如 `collocated -> fully_sync`、`disaggregated -> standalone_hybrid`；
-4. 校验模型权重、tokenizer 与训练数据的 storage source；v0.1 只接受 `hdfs_uri` 或 `hdfs_fuse_path`，不接受未标注来源的本地路径；
-5. 校验本机 GPU slot、并行维度、batch size 与模式约束；
+4. 归一化模型权重/tokenizer 路径，并校验训练数据的 storage source；模型与 checkpoint 路径不声明 `source_type`，也不因路径不是 HDFS/HDFS-FUSE 而被拒绝；
+5. 校验本机 GPU pool 数量、并行维度、batch size 与模式约束；
 6. 输出 resolved config，确保最终配置可审计；
 7. 生成不可变 `LaunchConfig`；
 8. 调用 Ray Driver 启动、dry-run 或仅校验。
 
 YAML 参数分为四层：
 
-- **拓扑与资源参数**：单机 GPU/CPU 数、`rollout_only_gpus`、`hybrid_gpus`、Ray address/namespace；
-- **并行维度参数**：trainer data parallel / FSDP world size、rollout tensor parallel、rollout actor 数、reward actor 数；
+- **拓扑与资源参数**：单机 GPU/CPU 数、`rollout_only_gpus`、`shared_gpus`、Ray address/namespace；
+- **并行维度参数**：trainer data parallel / FSDP world size、rollout data parallel、rollout tensor parallel、reward actor 数；
 - **训练语义参数**：model、dataset、algorithm、learning rate、batch size、max steps、seed、checkpoint；
 - **模式与控制参数**：用户入口 `collocated/disaggregated`，内部 canonical mode `fully_sync/standalone_hybrid`，以及 `max_policy_lag`、sample TTL、queue 水位、ObjectRef 背压阈值。
 
@@ -237,36 +318,38 @@ YAML 参数分为四层：
 
 ### 2.7 启动期输入 artifact 校验
 
-模型权重、tokenizer 与训练数据是 `LaunchConfig` 的前置输入。`main.py` 必须在初始化 Ray、创建 `ControllerActor` 或启动任何 GPU role 之前完成 fail-fast 校验；失败时直接报错退出，不进入部分启动状态。
+模型权重、tokenizer 与训练数据是 `LaunchConfig` 的前置输入。`main.py` 必须在初始化 Ray、创建 `ControllerActor` 或启动任何 GPU role 之前完成必要的 fail-fast 校验；失败时直接报错退出，不进入部分启动状态。
 
-v0.1 只支持两类输入来源：
+v0.1 的模型与 checkpoint 路径按普通 artifact path 处理，不要求声明 HDFS/HDFS-FUSE source type，也不把路径限制在某个 HDFS FUSE mount root 下。`model.model_path` 与 `model.tokenizer_path` 只负责告诉 trainer/rollout/backend loader 从哪里加载；路径是否真实可读由后端加载器或可选 artifact probe 处理，不作为配置 schema 的 storage source 约束。
+
+训练数据仍保留显式输入来源。v0.1 只支持两类数据输入来源：
 
 - `hdfs_uri`：形如 `hdfs://namenode/path` 的 HDFS URI；
 - `hdfs_fuse_path`：通过 HDFS FUSE 暴露出来的本机绝对路径，必须位于 `runtime.storage.hdfs_fuse.mount_root` 下。
 
-不允许把普通本地目录、相对路径、HTTP/S3/object-store URI 或未声明来源的路径伪装成启动输入。后续如果要支持对象存储，应显式扩展 schema 与校验器，而不是放宽字符串路径。
+数据不允许把普通本地目录、相对路径、HTTP/S3/object-store URI 或未声明来源的路径伪装成启动输入。后续如果要支持对象存储，应显式扩展 schema 与校验器，而不是放宽字符串路径。
 
 最小校验规则：
 
-- `model.source_type` 与 `data.source_type` 必须分别声明为 `hdfs_uri` 或 `hdfs_fuse_path`；
-- `model.model_uri` 必须存在且可读，目录内至少包含模型配置和权重文件，例如 `config.json` 以及 safetensors/bin shard；
-- `model.tokenizer_uri` 若为空，默认等于 `model.model_uri`；若显式填写，必须存在且可读，并包含 tokenizer 所需文件；
-- `data.dataset_uri` 必须存在且可读，可以是单文件或目录；如果是目录，必须能枚举到至少一个支持的数据文件；
+- `model.model_path` 必须是非空字符串；默认示例使用 `/mnt/hdfs/nano-ai/models/qwen`；
+- `model.tokenizer_path` 若为空，默认等于 `model.model_path`，不需要额外声明 `source_type`；
+- `data.source_type` 必须声明为 `hdfs_uri` 或 `hdfs_fuse_path`，并且在 `runtime.storage.allowed_input_sources` 内；
+- `data.data_path` 必须存在且可读，可以是单文件或目录；如果是目录，必须能枚举到至少一个支持的数据文件；
 - `data.prompt_column` 必须能在启动抽样校验中解析到，避免 worker 启动后才发现数据列错误；
-- HDFS URI 通过 HDFS client 做 exists/list/read probe；FUSE path 通过 POSIX stat/list/open probe，并校验路径没有逃逸出 `mount_root`；
-- 校验失败统一抛出 `InvalidInputArtifactError`，错误信息必须包含失败字段、source type、原始路径和具体原因。
+- 数据的 HDFS URI 通过 HDFS client 做 exists/list/read probe；数据的 FUSE path 通过 POSIX stat/list/open probe，并校验路径没有逃逸出 `mount_root`；
+- 校验失败统一抛出 `InvalidInputArtifactError`，错误信息必须包含失败字段、数据 source type、原始路径和具体原因。
 
 `run.intent=validate` 与 `dry_run` 也必须执行以上校验；区别只是校验成功后不启动或不完整启动 runtime。
 
 ### 2.8 Hugging Face 格式的测试 artifact 准备
 
-v0.1 的模型 ckpt 与纯文本训练数据默认按 Hugging Face 原生格式准备，但这只描述 artifact 的目录/文件格式，不改变启动期 storage source 约束。也就是说，下载脚本可以先把公开模型和数据集落到本机目录；真正写入 runtime YAML 时，仍应把这些目录放到 HDFS 或 HDFS-FUSE 暴露路径下，再通过 `hdfs_uri` 或 `hdfs_fuse_path` 引用。
+v0.1 的模型 ckpt 与纯文本训练数据默认按 Hugging Face 原生格式准备。模型 ckpt 可以直接作为普通目录写入 runtime YAML，例如 `/mnt/hdfs/nano-ai/models/qwen`，不需要 `source_type`；训练数据仍按 `data.source_type` 走显式 storage source 校验。
 
 测试用最小默认资产：
 
 - 模型 ckpt：`Qwen/Qwen3-0.6B`，保持 Hugging Face model snapshot 目录结构，例如 `config.json`、tokenizer 文件与 safetensors shard；
 - 纯文本数据集：`roneneldan/TinyStories`，默认使用 `train` split 的 `text` 列，可保存成 `datasets.load_from_disk` 可读取的本地 Hugging Face datasets 目录；
-- 训练数据默认只保存最多 `100M` 的 UTF-8 文本列内容，避免测试下载和落盘过大；如果需要完整数据集，必须显式传 `--dataset-max-bytes 0`；
+- 训练数据默认保存完整 split；如果需要更小的 smoke-test 资产，可以显式传 `--dataset-max-bytes 100M` 或 `--dataset-max-rows 10000`；
 - smoke test 可以只 materialize 前 N 行数据，但必须保留 `prompt_column/text_column` 元数据，避免后续 runtime 校验拿不到文本列。
 
 仓库脚本 `scripts/download_hf_assets.py` 只负责下载与落盘 manifest，不负责启动 Ray、不写训练循环，也不把模型/数据字段变成第二套训练命令行参数。脚本参数只覆盖 artifact 准备本身，例如 `--model-id`、`--dataset-id`、`--dataset-split`、`--dataset-text-column`、`--dataset-max-rows`、`--dataset-max-bytes` 与 `--output-dir`。
@@ -298,19 +381,19 @@ v0.1 的模型 ckpt 与纯文本训练数据默认按 Hugging Face 原生格式�
 
 ### 语义
 
-- `rollout_only` GPUs 与 trainer 解耦并行，持续做 rollout；
-- `hybrid` GPUs 在非训练窗口做 rollout，在训练窗口显式 toggle 成 trainer ranks；
+- `rollout_only_gpus` 与 trainer 解耦并行，持续做 rollout；
+- `shared_gpus` 在非训练窗口由 rollout replicas 使用，在训练窗口通过 lease 切给 trainer ranks；
 - rollout 可使用 `W_t, W_{t-1}, ...` 的受控旧权重窗口；
-- hybrid 不表示多机混合部署，而是单机 GPU slot 在 rollout/train role 之间切换。
+- hybrid 不表示多机混合部署，而是单机 shared GPU pool 在 rollout/train role 之间切换 CUDA 执行权。
 
 ### 时序（简化）
 
-1. 所有 `rollout_only + hybrid` slots 默认处于 rollout；
-2. 触发训练窗口时，`hybrid` slots drain rollout 并 toggle 到 train；
-3. `rollout_only` slots 不等待训练，继续向 sample queue 输送样本；
-4. trainer 在 `hybrid` slots 上消费样本并更新权重；
+1. 所有 rollout replicas 默认处于 rollout；
+2. 触发训练窗口时，shared GPU 对应的 rollout replicas drain/offload；
+3. rollout-only replicas 不等待训练，继续向 sample queue 输送样本；
+4. trainer ranks 获得 shared GPU lease 后消费样本并更新权重；
 5. rank0 发布新权重版本；
-6. `hybrid` slots 释放训练状态并 toggle 回 rollout，按策略激活新权重。
+6. trainer ranks 释放训练状态，shared GPU lease 回到 rollout，相关 replicas 按策略激活新权重。
 
 ### 关键约束
 
@@ -322,40 +405,40 @@ v0.1 的模型 ckpt 与纯文本训练数据默认按 Hugging Face 原生格式�
 
 ## 4. FSDP2 Trainer 详细设计
 
-Trainer 侧的设计目标是：用尽量小的抽象把 PPO-like 训练主路径跑通，同时把 FSDP2、权重发布、样本版本检查和 Ray slot 管理边界分清楚。Trainer 不直接管理 GPU token，也不直接向 rollout worker 发命令；它只消费 `SampleQueueActor` 中已经入队且满足版本约束的样本，并发布新的权重版本。
+Trainer 侧的设计目标是：用尽量小的抽象把 PPO-like 训练主路径跑通，同时把 FSDP2、权重发布、样本版本检查和 GPU lease 管理边界分清楚。Trainer 不直接管理全局 rollout 生命周期，也不直接向 rollout worker 发命令；它只消费 `SampleQueueActor` 中已经入队且满足版本约束的样本，并发布新的权重版本。
 
 ### 4.1 角色边界
 
 `TrainerGroup` 是逻辑组件，由下面几类对象组成：
 
 - `TrainerCoordinatorActor`：CPU actor，负责 train window 编排、rank/world size 分配、batch 消费、group epoch 管理和错误归一化；
-- `TrainerRank` role：由 `GpuSlotActor` 托管的 GPU role，负责 FSDP2 model/optimizer/scheduler、micro-batch forward/backward 和 optimizer step；
-- `RendezvousState`：由 coordinator 维护的轻量状态，包含 `group_epoch`、`world_size`、`rank -> slot_id`、`master_addr`、`master_port`、`timeout_sec`；
+- `TrainerRankActor`：独立 GPU execution actor，映射到自动分配的 `shared_gpus`，负责 FSDP2 model/optimizer/scheduler、micro-batch forward/backward 和 optimizer step；
+- `RendezvousState`：由 coordinator 维护的轻量状态，包含 `group_epoch`、`world_size`、`rank -> gpu_id`、`master_addr`、`master_port`、`timeout_sec`；
 - `WeightExportTask`：rank0 或独立 CPU task，负责把训练状态导出成 rollout 可消费的权重 artifact；
 - `MetricsActor`：接收 step time、tokens、loss、KL、grad norm、OOM、checkpoint/export 耗时等指标。
 
-`TrainerCoordinatorActor` 可以是 Ray actor；`TrainerRank` 初期可以实现为 `GpuSlotActor` 内部对象或不申请 GPU 的子 actor。关键约束是：真正拥有 `num_gpus=1` Ray token 的只能是 `GpuSlotActor`。
+`TrainerCoordinatorActor` 可以是 Ray actor；`TrainerRankActor` 是独立 actor/进程，与 rollout actor 分离故障域。长生命周期 trainer actor 不申请 Ray `num_gpus=1`，而是使用 `train_gpu_{id}` 这类 role-scoped custom resource，并在执行 CUDA 前校验 `GpuLeaseManagerActor` 发放的 trainer lease。
 
 ### 4.2 TrainerRank 生命周期
 
-每个 `TrainerRank` 只存在于 `hybrid` slot 上，生命周期由 slot 的 active role gate 控制：
+每个 `TrainerRankActor` 只映射到 `shared_gpus` 上，生命周期由 GPU lease active-role gate 控制：
 
-1. `ABSENT`：`rollout_only` slot 没有 trainer rank；
+1. `ABSENT`：`rollout_only_gpus` 没有 trainer rank；
 2. `INIT`：加载模型配置、tokenizer metadata、optimizer/scheduler 配置，但不得执行 CUDA kernel；
 3. `READY`：训练 role 可被激活，持有必要 metadata；
-4. `TRAIN_ACTIVE`：slot 已经释放 rollout CUDA 状态，rank 在首个 healthy epoch 初始化 process group，后续窗口复用该 group 并执行 FSDP2；
+4. `TRAIN_ACTIVE`：shared GPU 已经释放 rollout CUDA 状态并授予 trainer lease，rank 在首个 healthy epoch 初始化 process group，后续窗口复用该 group 并执行 FSDP2；
 5. `DRAINING`：当前 micro-step 或 optimizer step 到达安全点；
 6. `PAUSED`：保留训练 metadata，但不能继续执行；
 7. `CPU_STANDBY` / `UNLOADED`：正常 toggle 优先把 model shard、optimizer state、scheduler/RNG/scaler 保留在 CPU standby；只有 fallback 或恢复路径才退化到仅保留 checkpoint/weight version/rank metadata；
 8. `FAILED`：rank 失败，整个 `TrainerGroup` 必须视作失败并重建。
 
-Trainer 不允许绕过 `GpuSlotActor` 直接调用 inactive rank。任何 `train_step` 调用都必须先检查 slot 处于 `TRAIN_ACTIVE`，并且 `group_epoch` 与当前 coordinator epoch 一致。
+Trainer 不允许绕过 `GpuLeaseManagerActor` 直接调用 inactive rank。任何 `train_step` 调用都必须先检查 trainer lease、`lease_epoch` 和 `group_epoch`，并且 GPU 处于 trainer active 状态。
 
 ### 4.3 并行策略
 
 v0.1 的 trainer 并行策略以 FSDP2 为核心：
 
-- **Data parallel / FSDP world**：`fsdp_world_size == hybrid slots == trainer.num_ranks`；
+- **Data parallel / FSDP world**：`fsdp_world_size == shared_gpus == trainer.num_ranks`；
 - **Tensor parallel**：v0.1 不启用 trainer tensor parallel，配置面保留但必须为 `1`；
 - **Pipeline parallel**：v0.1 不启用，配置面保留但必须为 `1`；
 - **Gradient accumulation**：通过 micro-batch 累积得到 `global_batch_size`；
@@ -421,9 +504,9 @@ Trainer 在 materialize batch 后必须执行：
 6. 满足 accumulation 后执行 optimizer step；
 7. coordinator 汇总 `TrainStats`；
 8. rank0 判断是否到达 publish/checkpoint 周期；
-9. 成功后 ack queue 消费；失败则释放 reservation 或标记 batch 不可重试。
+9. 成功后 ack queue 消费；失败则释放 reservation 或标记 batch 不可重试，并把 shared GPU lease 切回 rollout。
 
-Queue ack 必须晚于 optimizer step 成功。否则 trainer OOM 或 rank failure 会造成样本丢失但训练没有更新。
+Queue ack 必须晚于 optimizer step 成功。否则 trainer OOM 或 rank failure 会造成样本丢失但训练没有更新。失败路径不能把 batch 长期留在 reserved，也不能让 shared GPU 停在 trainer active 状态等待下一轮。
 
 ### 4.6 权重导出与发布
 
@@ -449,7 +532,7 @@ weights/
 
 `version_id` 由 `WeightRegistryActor` 单调分配或由 trainer step 单调映射，但必须全局唯一。`parent_version` 指向上一个成功训练基线。注册成功不代表所有 rollout workers 已经激活，只代表该版本可供激活。
 
-v0.1 不把大权重放进 Ray object store。Ray 只传 `WeightMeta`，其中 `source_type` 和 URI 指向 HDFS 或 HDFS FUSE 路径。
+v0.1 不把大权重放进 Ray object store。Ray 只传 `WeightMeta`，其中 URI/path 指向 backend loader 可读取的模型或 checkpoint artifact。
 
 ### 4.7 Trainer 失败语义
 
@@ -465,20 +548,30 @@ Trainer 失败以 group 为单位处理：
 
 ## 5. vLLM Rollout 详细设计
 
-Rollout 侧的目标是持续生成带版本号的样本，并在权重切换、hybrid slot toggle 和 queue 背压下保持可控。Rollout 不负责训练语义，也不直接修改权重 registry；它只按指定权重版本生成，并把生成结果交给 sample/reward pipeline。
+Rollout 侧的目标是持续生成带版本号的样本，并在权重切换、shared GPU lease 切换和 queue 背压下保持可控。Rollout 不负责训练语义，也不直接修改权重 registry；它只按指定权重版本生成，并把生成结果交给 sample/reward pipeline。
 
 ### 5.1 角色边界
 
-`RolloutActorPool` 是逻辑池，由以下对象组成：
+Rollout 采用三层 actor 结构，由以下对象组成：
 
-- `RolloutCoordinatorActor`：CPU actor，负责 prompt 分发、worker 选择、policy version 选择、in-flight 跟踪、背压响应；
-- `RolloutWorker` role：由 `GpuSlotActor` 托管，内部运行 vLLM engine；
+- `RolloutManagerActor`：全局 CPU actor，负责 rollout 生命周期、初始化和拉起 replica/worker actors、input backlog、queue 水位、权重同步、rollout/train 状态切换协同；
+- `RolloutReplicaControllerActor`：每个 rollout DP replica 一个 CPU actor；当 vLLM `tensor_parallel_size > 1` 时，它管理一个 TP group 的权重激活、通信组、drain/offload/wake 和失败恢复；
+- `RolloutWorkerActor`：每个 vLLM TP rank 一个 GPU execution actor，维护具体 GPU 状态、vLLM worker/shard、KV cache、TP 通信状态和 CUDA residency；
 - `PromptSource`：从 dataset reader 或 controller 提供 prompt batch；
 - `RewardActorPool`：可选 CPU/GPU actors，负责 reward function、rule reward、model reward 或后处理；
 - `SampleQueueActor`：接收已完成 sample refs；
 - `WeightRegistryActor`：提供 latest/healthy weight version 和 activation 状态。
 
-v0.1 优先使用 vLLM Python engine 嵌入到 `RolloutWorker` role 中。若后续发现进程隔离更稳定，可以把 vLLM engine 包装成 slot 内子进程，但仍由 `GpuSlotActor` 控制 CUDA ownership、drain 和重启。
+v0.1 的本地 smoke runtime 可以把 replica controller 和 worker 适配器简化到纯 Python 对象；真实 Ray/vLLM 路径应保留 `RolloutManagerActor -> RolloutReplicaControllerActor -> RolloutWorkerActor` 边界。若 vLLM engine 需要更强进程隔离，可以由 worker actor 拉起 backend 子进程，但 CUDA 执行仍必须受 GPU lease token gate 约束。
+
+当前 runtime core 已把 `RolloutManagerCore` 做成 dataloader 与 rollout backend 之间的显式控制面：
+
+- dataloader/controller 调用 `enqueue_prompts(prompts)` 把输入放入 manager 的 input backlog；
+- manager 维护 `in_flight` 与 `in_flight_by_replica`，按 replica capacity 做 round-robin dispatch；
+- `dispatch_from_backlog(...)` 同时检查 output queue depth、`queue_high_watermark`、`max_pending_rollout_refs` 展开的 in-flight 上限和本轮 `max_new_requests`；
+- `ControllerCore.pump_rollout_until_blocked(...)` 会重复调用 dispatch/generate/submit，直到 backlog 清空、queue high watermark、capacity 或本轮预算阻塞；
+- 当 output queue 水位已到 high watermark 时，manager 返回空 dispatch，而不是继续制造 sample refs；
+- 权重切换时 `pause_for_weight(reason)` 会让新 dispatch fail-fast，activation 完成后 `resume()` 才恢复。
 
 ### 5.2 RolloutWorker 生命周期
 
@@ -491,9 +584,9 @@ Rollout role 的状态：
 5. `DRAINING`：停止接新请求，等待 in-flight 完成或取消；
 6. `PAUSED`：保留 worker metadata，不执行 CUDA；
 7. `UNLOADED`：释放 vLLM engine/KV cache/CUDA memory；
-8. `FAILED`：worker 失败，等待 slot 或 pool 恢复。
+8. `FAILED`：worker 失败，等待 replica 或 pool 恢复。
 
-Hybrid slot 在 train window 前必须从 `ROLLOUT_ACTIVE` 走到 `UNLOADED` 或等价的 CUDA quiesced 状态；`rollout_only` slot 不参与 train barrier，持续保持 rollout。
+Shared GPU 对应的 rollout replica 在 train window 前必须从 `ROLLOUT_ACTIVE` 走到 `UNLOADED` 或等价的 CUDA quiesced 状态；`rollout_only_gpus` 对应的 replicas 不参与 train barrier，持续保持 rollout。
 
 ### 5.3 GenerationRequest 契约
 
@@ -536,24 +629,25 @@ error: optional[str]
 
 v0.1 的 rollout 并行以 data parallel 为主：
 
-- 每张 active rollout GPU 一个 `RolloutWorker`；
+- 每个 rollout DP replica 一个 `RolloutReplicaControllerActor`；
+- 每个 replica 内有 `tensor_parallel_size` 个 `RolloutWorkerActor`，每个 worker 绑定一个自动分配的 GPU；
 - 每个 worker 内部交给 vLLM continuous batching；
-- `RolloutCoordinatorActor` 按 prompt 长度桶分发，避免长样本拖慢所有 worker；
+- `RolloutManagerActor` 按 prompt 长度桶和 replica 负载分发，避免长样本拖慢所有 worker；
 - `max_pending_rollout_refs` 限制 worker 侧未入队或未消费的 sample refs；
 - `queue_high_watermark` 触发限流；
-- `queue_low_watermark` 触发补采样。
+- output queue 水位低于 high watermark 且存在 in-flight capacity 时，manager 从 input backlog 补采样。
 
-`tensor_parallel_size=1` 是 v0.1 默认和推荐值。未来支持 TP 时，需要增加 `RolloutGroupActor`：
+当 `tensor_parallel_size > 1` 时，TP group 由 `RolloutReplicaControllerActor` 统一管理：
 
-- 一个 group 聚合多个 `GpuSlotActor`；
-- group 内统一创建 vLLM TP 通信组；
-- group 作为一个 rollout worker 接受 request；
-- activation、drain、failure 都以 group 为单位处理；
-- group 中任一 slot 失败，该 group 整体 failed。
+- 一个 replica controller 聚合多个 `RolloutWorkerActor`；
+- replica 内统一创建 vLLM TP 通信组；
+- replica 作为一个 logical rollout endpoint 接受 request；
+- activation、drain、offload、wake、failure 都以 replica 为单位处理；
+- replica 中任一 TP worker 失败，该 replica 整体 failed 或 rebuild。
 
 ### 5.5 Policy version 选择
 
-Rollout 请求必须绑定一个 target policy version。选择策略由 `RolloutCoordinatorActor` 执行：
+Rollout 请求必须绑定一个 target policy version。选择策略由 `RolloutManagerActor` 执行：
 
 - `fully_sync`：只允许 latest version，且 rollout 前必须所有 worker 激活同一版本；
 - `standalone_hybrid`：允许 latest 与 bounded lagged versions 混合；
@@ -563,38 +657,40 @@ Rollout 请求必须绑定一个 target policy version。选择策略由 `Rollou
 
 所有 sample 都必须记录实际生成时使用的 behavior policy 版本和 `weight_checksum`。非 partial rollout 样本可以只有单个 `policy_version`；partial rollout 样本必须额外记录 token span 级 `policy_segments`。不能用“请求时的 latest”替代实际 active 版本。
 
-### 5.6 Hybrid slot 上的 rollout drain
+### 5.6 Shared GPU 上的 rollout drain
 
-进入 train window 前，hybrid rollout drain 的步骤：
+进入 train window 前，shared GPU 上 rollout drain 的步骤：
 
-1. `ControllerActor` 通知 `RolloutCoordinatorActor` 停止向 hybrid workers 发新请求；
-2. hybrid workers 标记 `DRAINING`；
+1. `ControllerActor` 通知 `RolloutManagerActor` 停止向占用 `shared_gpus` 的 replicas 发新请求；
+2. 这些 replicas 和其 TP workers 标记 `DRAINING`；
 3. in-flight generation 在 `rollout_drain_timeout_sec` 内完成；
 4. 完成的 samples flush 到 `SampleQueueActor`；
 5. 超时请求取消，并记录 cancellation reason；
 6. worker 释放 KV cache、engine CUDA memory 和可能的 CUDA graph；
-7. `GpuSlotActor` 检查 CUDA quiesce；
-8. slot 切换到 trainer role。
+7. `GpuLeaseManagerActor` 检查 CUDA quiesce 并递增 lease epoch；
+8. shared GPUs 的 lease 切换到 trainer role。
 
-这个流程只作用于 hybrid slots。`rollout_only` slots 在 standalone_hybrid 模式下继续接收 prompt 并持续生成。
+这个流程只作用于 `shared_gpus` 对应的 rollout replicas。`rollout_only_gpus` 在 standalone_hybrid 模式下继续接收 prompt 并持续生成。
 
 ### 5.7 Partial Rollout 权重切换
 
-v0.1 不做 `eager` / `lazy` / `staged` 三套 activation 策略，也不做小流量探针。权重 ready 后采用一个简单的全局暂停式 **partial rollout** 切换：暂停所有 rollout-capable workers 的 scheduler，同步新权重，然后让 in-flight requests 在新权重下继续 decode。
+v0.1 不做 `eager` / `lazy` / `staged` 三套 activation 策略，也不做小流量探针。权重 ready 后采用一个简单的全局暂停式 **partial rollout** 切换：暂停所有 rollout replicas 的 scheduler，同步新权重，然后让 in-flight requests 在新权重下继续 decode。
 
 1. `WeightRegistryActor` 标记新版本为 `REGISTERED`；
-2. `RolloutCoordinatorActor` 停止向所有 rollout-capable workers 发新请求；
+2. `RolloutManagerActor` 停止向所有 rollout replicas 发新请求；
 3. 所有 rollout workers 进入 `PAUSING_FOR_WEIGHT`；
 4. vLLM 执行 `pause_generation(mode="keep", clear_cache=true)`，冻结 in-flight requests；
 5. 所有 workers 释放旧 KV cache / prefix cache；
-6. 所有 workers 加载同一个目标 `WeightMeta`；
-7. workers 重新 prefill / rebuild 新权重下的 KV cache；
-8. 所有 workers 上报目标版本 active；
-9. `WeightRegistryActor` 将该版本标记为 `ACTIVE_GLOBAL`；
-10. vLLM 执行 `resume_generation()`，in-flight requests 继续生成；
-11. `RolloutCoordinatorActor` 恢复发新 prompt。
+6. `RolloutReplicaControllerActor` 为每个 TP worker 读取当前 rollout lease token；
+7. 所有 workers 在校验 `(gpu_id, role=rollout, holder_id, lease_epoch)` 后加载同一个目标 `WeightMeta`；
+8. workers 重新 prefill / rebuild 新权重下的 KV cache；
+9. Controller 在 ack 前重新向 `GpuLeaseManagerActor` 校验 lease epoch 没有变化；
+10. 所有 workers 上报目标版本 active；
+11. `WeightRegistryActor` 将该版本标记为 `ACTIVE_GLOBAL`；
+12. vLLM 执行 `resume_generation()`，in-flight requests 继续生成；
+13. `RolloutManagerActor` 恢复发新 prompt。
 
-这个策略牺牲一小段 scheduler pause 时间，但实现面比 staged activation 简单：没有 worker 子集、没有灰度版本、没有 staged rollback。只要权重加载 API 报错或 worker 进程崩溃，controller 就把本次切换视为失败并进入 `PAUSED` 或整体重建；v0.1 不做“先切一部分确认正常再全量”的健康探针。
+这个策略牺牲一小段 scheduler pause 时间，但实现面比 staged activation 简单：没有 worker 子集、没有灰度版本、没有 staged rollback。只要权重加载 API 报错、lease epoch 校验失败或 worker 进程崩溃，controller 就把本次切换视为失败，`WeightRegistryActor` 将目标版本标记为 `FAILED`，`RolloutManagerActor` 退出暂停态但不把失败版本作为 active；必要时进入 `PAUSED` 或整体重建。v0.1 不做“先切一部分确认正常再全量”的健康探针。
 
 Partial rollout 的语义是：一个 response 可以包含旧权重生成的前缀和新权重生成的后缀。`clear_cache=true` 时，resume 后的 token 会在新权重下重新计算 KV cache，不继续复用旧权重的 stale KV。这样的 mixed-policy sample 可以进入训练，但不能再只用一个单值 `policy_version` 表达完整行为策略；`SampleRecord` 必须记录 `policy_segments`，并保留 token-level old logprobs。Trainer 做 policy lag guard 时按 sample 中最旧的 behavior version 保守计算。
 
@@ -608,15 +704,15 @@ Bridge 层负责两件事：rollout 样本从生成侧进入训练侧，trainer 
 
 rollout 到 trainer 的路径：
 
-1. `RolloutCoordinatorActor` 选择 prompt batch 与 target policy version；
-2. `RolloutWorker` 生成 response、tokens、old logprobs；
+1. `RolloutManagerActor` 选择 prompt batch、target policy version 与 rollout replica；
+2. `RolloutReplicaControllerActor` 调用 TP workers 生成 response、tokens、old logprobs；
 3. `RewardActorPool` 计算 reward，或把 reward ref 挂到 sample metadata；
 4. worker 构造 `SampleRecordBatch` 并放入 Ray object store；
 5. worker 将 `ObjectRef` 和 batch metadata 提交给 `SampleQueueActor`；
 6. `SampleQueueActor` 根据 TTL、policy lag、水位和 pending refs 决定 accept/drop/defer；
 7. `TrainerCoordinatorActor` reserve batch；
 8. train step 成功后 ack；
-9. train step 失败后 release reservation 或标记不可重试。
+9. train step 失败后 release reservation 或标记不可重试，并恢复 shared GPU rollout lease。
 
 `SampleQueueActor` 的内部状态建议分层：
 
@@ -638,16 +734,16 @@ trainer 到 rollout 的路径：
 4. exporter 原子提交为 `policy-v000123/`；
 5. exporter 调用 `WeightRegistryActor.register(meta)`；
 6. registry 把版本标记为 `REGISTERED`；
-7. rollout coordinator 暂停所有 rollout-capable workers；
-8. workers 释放旧 KV cache 并拉取/加载同一个目标版本；
-9. workers ack active target version；
+7. `RolloutManagerActor` 暂停所有 rollout replicas；
+8. replica controllers 协调 TP workers 释放旧 KV cache 并拉取/加载同一个目标版本；
+9. replicas ack active target version；
 10. registry 在所有要求的 workers ack 后更新 latest served version。
 
 Weight state 建议：
 
 - `CREATING`：trainer/exporter 正在写；
 - `REGISTERED`：artifact 校验通过，可以被激活；
-- `ACTIVATING`：所有 rollout-capable workers 已暂停，正在批量加载；
+- `ACTIVATING`：所有 rollout replicas 已暂停，正在批量加载；
 - `ACTIVE_GLOBAL`：所有要求的 worker 已服务该版本；
 - `FAILED`：artifact 不可用，或批量加载过程中任一必要 worker 失败；
 - `DEPRECATED`：仍可回滚，但不再用于新请求；
@@ -661,9 +757,8 @@ Weight state 建议：
 version_id: int
 parent_version: int
 created_at: ts
-source_type: [hdfs_uri, hdfs_fuse_path]
-model_uri: str
-tokenizer_uri: str
+model_path: str
+tokenizer_path: str
 format: [hf, safetensors, vllm_compatible]
 checksum: str
 ```
@@ -752,9 +847,9 @@ expires_at: ts
 - `TRAINER_GROUP_FAILED`：FSDP2 group 失效；
 - `WEIGHT_EXPORT_FAILED`：trainer 导出失败；
 - `WEIGHT_DISTRIBUTION_FAILED`：rollout 激活失败；
-- `HYBRID_TOGGLE_TIMEOUT`：slot toggle 超时；
-- `HYBRID_STATE_OFFLOAD_FAILED`：model/optimizer 或 rollout engine 无法从 GPU 安全 offload 到 CPU；
-- `HYBRID_STATE_HYDRATE_FAILED`：CPU standby state 无法恢复到 GPU active；
+- `SHARED_GPU_TOGGLE_TIMEOUT`：shared GPU lease 切换或 replica drain 超时；
+- `SHARED_GPU_OFFLOAD_FAILED`：model/optimizer 或 rollout engine 无法从 GPU 安全 offload 到 CPU；
+- `SHARED_GPU_HYDRATE_FAILED`：CPU standby state 无法恢复到 GPU active；
 - `TRAINER_COMM_GROUP_UNHEALTHY`：process group 心跳、barrier 或 collective 顺序异常；
 - `TRAINER_COMM_GROUP_REBUILT`：旧 `comm_epoch` 失效并完成整组重建；
 - `OBJECT_STORE_PRESSURE`：Ray object store 压力过高。
@@ -766,7 +861,7 @@ event_id: str
 event_type: str
 severity: [info, warning, error, fatal]
 source_actor: str
-slot_id: optional[int]
+gpu_id: optional[int]
 policy_version: optional[int]
 group_epoch: optional[int]
 created_at: ts
@@ -777,7 +872,7 @@ details: map[str, any]
 
 - 控制消息：Pydantic model 直接作为 Ray actor method 参数；
 - 样本批次：大 batch 放入 Ray object store，以 `ObjectRef` 在 actor 间传递；
-- 权重版本：只传 `WeightMeta`，其中 `source_type` + `model_uri` / `tokenizer_uri` 指向 HDFS URI 或 HDFS FUSE path；v0.1 不把未校验的普通本地路径作为可传播权重；
+- 权重版本：只传 `WeightMeta`，其中 `model_path` / `tokenizer_path` / artifact URI 指向 backend loader 可读取的普通 artifact path；不把大权重作为 Ray object payload 传播；
 - 指标事件：小 payload 直接发给 `MetricsActor`，高频 token 级明细先本地聚合再上报；
 - 错误：actor method 抛出的异常由 `ControllerActor` 归一化为 health event。
 
@@ -796,7 +891,7 @@ Bridge 层要保证下面的最小一致性：
 - partial rollout sample 进入 trainer 前必须带 `policy_segments`，不能把 mixed-policy response 伪装成单一行为策略；
 - train batch 必须记录 batch 内版本分布；
 - weight version 注册必须晚于 artifact 校验；
-- rollout activation ack 必须来自实际加载该版本的 worker；v0.1 要求所有 rollout-capable workers 批量切到同一目标版本后再恢复发 prompt；
+- rollout activation ack 必须来自实际加载该版本的 replica/worker；v0.1 要求所有 rollout replicas 批量切到同一目标版本后再恢复发 prompt；
 - queue ack 必须晚于 optimizer step 成功；
 - failed weight 不能被新 rollout request 选择；
 - failed train step 不能消费掉 queue reservation。
@@ -813,53 +908,53 @@ standalone_hybrid 允许 bounded staleness，但不允许 unbounded async。任�
 
 每个角色都显式声明资源，避免隐式抢占：
 
-- GPU：每张物理 GPU 对应一个 `GpuSlotActor(num_gpus=1)`；
-- trainer：通过 `hybrid` slots 形成 `TrainerGroup` ranks；
-- rollout：通过 `rollout_only + hybrid` slots 形成 `RolloutActorPool` workers；
+- GPU：`GpuLeaseManagerActor` 维护每张物理 GPU 的 active role、holder、lease epoch 和失败状态；
+- trainer：通过自动分配到 `shared_gpus` 的 `TrainerRankActor` 形成 `TrainerGroup` ranks；
+- rollout：通过自动分配到 `rollout_only_gpus + shared_gpus` 的 `RolloutReplicaControllerActor` / `RolloutWorkerActor` 形成 rollout replicas；
 - reward：`num_reward_actors`、`cpus_per_actor` 或可选 GPU；
 - queue/metrics/controller：默认 CPU actor。
 
 `ControllerActor` 根据这些配置创建 placement groups，并在 dry-run 阶段检查本机 Ray runtime 可用资源。
 
-`runtime.ray.gpu_manager.slots` 是物理 GPU 分配的源头。`placement.trainer.num_ranks` 必须等于 `hybrid`，`placement.rollout.num_actors * gpus_per_actor` 必须等于 `rollout_only + hybrid`。v0.1 推荐 `gpus_per_actor=1`，多 GPU vLLM rollout 后续通过 `RolloutGroupActor` 处理。
+`runtime.ray.gpu_manager.topology` 是物理 GPU 数量分配的源头，resolved config 会展开为 `ResolvedGpuPlan`。`placement.trainer.num_ranks` 必须等于 `shared_gpus`，`placement.rollout.num_replicas * placement.rollout.tensor_parallel_size` 必须等于 `rollout_only_gpus + shared_gpus`。用户不手写 GPU id；dry-run 和 resolved config 展示系统生成的 `gpu_id`。
 
 ### 7.2 Fully Sync controller loop
 
-`fully_sync` 对应用户 YAML `mode=collocated`。所有 GPU 都是 hybrid slots，没有 standalone rollout GPU。
+`fully_sync` 对应用户 YAML `mode=collocated`。`rollout_only_gpus=0`，所有 rollout GPUs 都来自 `shared_gpus`。
 
 单个 iteration：
 
-1. Controller 确认所有 hybrid slots 处于 rollout role；
+1. Controller 确认所有 shared GPUs 的 lease 处于 rollout role；
 2. WeightRegistry 返回当前 latest healthy version `W_t`；
-3. RolloutCoordinator 确认所有 rollout workers 激活 `W_t`；
+3. RolloutManager 确认所有 rollout replicas 激活 `W_t`；
 4. Controller 发起本轮 rollout requests；
 5. SampleQueue 达到本轮 train batch 目标后停止发新 rollout；
-6. 所有 hybrid rollout workers drain；
-7. hybrid slots toggle 到 trainer；
+6. 所有 shared rollout replicas drain；
+7. shared GPU leases 切换到 trainer；
 8. TrainerCoordinator 建立或恢复 FSDP2 group；
 9. Trainer 执行一个或多个 optimizer updates；
 10. rank0/exporter 发布 `W_{t+1}`；
-11. hybrid slots toggle 回 rollout；
+11. shared GPU leases 切换回 rollout；
 12. rollout workers 激活 `W_{t+1}` 后进入下一轮。
 
 这个模式下 `max_policy_lag` 应为 `0`，`policy_pin.lagged_ratio` 必须为 `0`。如果任一 worker 没有激活 `W_t`，本轮 rollout 不应开始。
 
 ### 7.3 Standalone Hybrid controller loop
 
-`standalone_hybrid` 对应用户 YAML `mode=disaggregated`。`rollout_only` slots 持续生成，`hybrid` slots 在 rollout/train 之间切换。
+`standalone_hybrid` 对应用户 YAML `mode=disaggregated`。`rollout_only_gpus` 持续生成，`shared_gpus` 在 rollout/train 之间切换。
 
 主循环：
 
-1. rollout_only 与当前处于 rollout role 的 hybrid slots 持续接收 prompt；
+1. rollout-only replicas 与当前处于 rollout role 的 shared replicas 持续接收 prompt；
 2. SampleQueue 按版本、TTL、水位接收样本；
 3. Controller 观察 queue depth、token depth、policy lag、trainer idle time；
-4. 达到 train trigger 后，只 drain hybrid slots；
-5. rollout_only slots 继续生成，但受 queue 背压和 policy lag guard 限制；
-6. hybrid slots toggle 到 trainer；
+4. 达到 train trigger 后，只 drain shared rollout replicas；
+5. rollout-only replicas 继续生成，但受 queue 背压和 policy lag guard 限制；
+6. shared GPU leases 切换到 trainer；
 7. trainer 消费 queue 中满足 freshness 的 batch；
 8. trainer 发布新 weight version；
-9. hybrid slots toggle 回 rollout；
-10. rollout coordinator 暂停所有 rollout-capable workers，批量加载新版本并在全局 active 后恢复发 prompt。
+9. shared GPU leases 切换回 rollout；
+10. RolloutManager 暂停所有 rollout replicas，批量加载新版本并在全局 active 后恢复发 prompt。
 
 Train trigger 可以由下面任一条件触发：
 
@@ -869,17 +964,17 @@ Train trigger 可以由下面任一条件触发：
 - policy lag 接近上限，需要推进新版本；
 - 手动控制命令要求 flush/train。
 
-如果 queue 低于低水位，Controller 不应强行开启 train window，除非处于 shutdown/checkpoint/drain 场景。
+如果 queue 还不足以形成有效 train batch，Controller 不应强行开启 train window，除非处于 shutdown/checkpoint/drain 场景。
 
 ### 7.4 队列水位
 
 - `queue_high_watermark`：超过则 rollout 降速/限流；
-- `queue_low_watermark`：低于则 rollout 提速或补采样。
+- output queue 未达到 high watermark 且 rollout manager 仍有 in-flight capacity 时，从 input backlog 补采样。
 
 建议增加 token 维度水位，因为 sequence 数不能真实反映训练成本：
 
 - `queue_high_token_watermark`：可选，按 response tokens 控制总 backlog；
-- `queue_low_token_watermark`：可选，低于时补采样；
+- `queue_target_token_watermark`：可选，低于目标水位时提高补采样预算；
 - `max_batch_policy_span`：一个 train batch 内允许的最大版本跨度。
 
 ### 7.5 ObjectRef 背压
@@ -929,16 +1024,16 @@ Trainer reserve batch 时的推荐顺序：
 
 ## 8. 状态管理与通信组创建维护
 
-状态管理的原则是：每类状态只有一个权威 owner，其他组件通过查询、订阅或 actor call 获取状态，不能本地猜测。这样可以避免 rollout 以为自己已经切到新权重、trainer 以为 queue batch 已被消费、slot 以为 CUDA 已释放这类隐蔽错误。
+状态管理的原则是：每类状态只有一个权威 owner，其他组件通过查询、订阅或 actor call 获取状态，不能本地猜测。这样可以避免 rollout 以为自己已经切到新权重、trainer 以为 queue batch 已被消费、GPU lease manager 以为 CUDA 已释放这类隐蔽错误。
 
 ### 8.1 状态 owner
 
 | 状态 | 权威 owner | 说明 |
 | --- | --- | --- |
 | 运行模式 | `ControllerActor` | `fully_sync` / `standalone_hybrid` / degraded / paused |
-| GPU slot active role | `GpuSlotActor` | 同一时刻只能一个 role 有 CUDA 执行权 |
+| GPU active-role lease | `GpuLeaseManagerActor` | 同一张 shared GPU 同一时刻只能一个 role 有 CUDA 执行权 |
 | FSDP2 group | `TrainerCoordinatorActor` | rank 映射、group epoch、rendezvous 参数 |
-| Rollout worker pool | `RolloutCoordinatorActor` | worker 可调度状态、in-flight、版本分布 |
+| Rollout worker pool | `RolloutManagerActor` / `RolloutReplicaControllerActor` | replica 可调度状态、in-flight、TP group、版本分布 |
 | Weight version | `WeightRegistryActor` | version status、latest healthy、activation ack |
 | Sample lifecycle | `SampleQueueActor` | pending/reserved/acked/dropped refs |
 | Health events | `MetricsActor` 或 health sink | 事件聚合、阈值判断输入 |
@@ -957,34 +1052,35 @@ Trainer reserve batch 时的推荐顺序：
 6. 创建 placement group；
 7. 创建 `ControllerActor`；
 8. Controller 创建 `WeightRegistryActor`、`SampleQueueActor`、`MetricsActor`；
-9. Controller 创建每张 GPU 对应的 `GpuSlotActor`；
-10. 每个 slot 初始化 role metadata；
+9. Controller 创建 `GpuLeaseManagerActor` 并加载 resolved `gpu_plan`；
+10. Controller 创建 rollout manager、replica controllers、rollout workers 和 trainer ranks；
 11. registry 注册初始 `W_0`；
 12. rollout workers 激活 `W_0`；
 13. FSM 从 `BOOTSTRAP` 进入目标 active 状态。
 
 在第 12 步之前，不允许开始生成样本。在第 4 步失败时，不应该启动 Ray 或创建任何 GPU actor。
 
-### 8.3 GpuSlotActor active-role gate
+### 8.3 GpuLeaseManager active-role gate
 
-`GpuSlotActor` 是 CUDA 执行权 owner。它需要提供最小 gate：
+`GpuLeaseManagerActor` 是 CUDA 执行权 owner。它需要提供最小 gate：
 
 ```text
-assert_active(role, expected_epoch)
-toggle(target_role, reason, timeout)
-get_slot_state()
-mark_failed(reason)
+grant(role, gpu_id, holder_id, reason)
+current_lease(role, gpu_id, holder_id)
+assert_active(role, gpu_id, holder_id, expected_epoch)
+states()
+mark_failed(gpu_id, reason)
 ```
 
 所有 role method 进入 CUDA 前都要检查：
 
-- slot 是否 failed；
+- GPU 是否 failed；
 - active role 是否匹配；
-- role epoch 是否匹配；
+- lease epoch 是否匹配；
 - 当前是否处于 draining/paused；
 - 是否超过 toggle timeout。
 
-如果检查失败，应 fail-fast 返回结构化错误，而不是等待 inactive role 未来变 active。这样 direct client 即使绕过 coordinator 调用 slot 内 role，也不会在错误窗口执行 CUDA work。
+如果检查失败，应 fail-fast 返回结构化错误，而不是等待 inactive role 未来变 active。这样 direct client 即使绕过 coordinator 调用 role actor，也不会在错误窗口执行 CUDA work。
 
 ### 8.4 Trainer 通信组创建
 
@@ -995,10 +1091,10 @@ group_epoch: int
 world_size: int
 ranks:
   - rank: 0
-    slot_id: 4
+    gpu_id: 4
     actor_id: trainer-rank-0
   - rank: 1
-    slot_id: 5
+    gpu_id: 5
     actor_id: trainer-rank-1
 master_addr: str
 master_port: int
@@ -1008,10 +1104,10 @@ timeout_sec: int
 
 创建流程：
 
-1. Controller 请求 hybrid slots toggle 到 trainer；
-2. 所有 hybrid slots 到达 `TRAIN_ACTIVE`；
+1. Controller 请求 shared GPUs 的 rollout replicas drain/offload；
+2. `GpuLeaseManagerActor` 将 shared GPUs lease 授予 trainer ranks；
 3. TrainerCoordinator 生成新的 `group_epoch`；
-4. TrainerCoordinator 固定 `rank -> slot_id`；
+4. TrainerCoordinator 固定 `rank -> gpu_id`；
 5. TrainerCoordinator 下发 rendezvous 参数；
 6. 每个 rank 初始化 `torch.distributed` process group；
 7. 每个 rank 初始化 FSDP2 wrapper、optimizer、scheduler；
@@ -1030,38 +1126,36 @@ timeout_sec: int
 5. ranks 将 model shard、optimizer state、scheduler/RNG/scaler 等状态 offload 到 CPU standby；
 6. ranks 释放训练临时 CUDA tensors/cache；
 7. process group 保持存活但 idle，不再发起 collective；
-8. slot 标记 trainer role quiesced；
-9. Controller 允许 toggle 回 rollout。
+8. GPU lease manager 标记 trainer role quiesced；
+9. Controller 允许 shared GPU lease 切回 rollout。
 
-真正销毁或重建 process group 只发生在 slot/rank failure、NCCL error、作业恢复或 shutdown 路径。重建时必须生成新的 `group_epoch` / `comm_epoch`，并让旧 epoch 的 pending train batch 和 late ack 全部失效。
+真正销毁或重建 process group 只发生在 GPU/rank failure、NCCL error、作业恢复或 shutdown 路径。重建时必须生成新的 `group_epoch` / `comm_epoch`，并让旧 epoch 的 pending train batch 和 late ack 全部失效。
 
 如果任一 rank 初始化失败或 heartbeat 超时，整个 group epoch 失败。不要尝试把部分 rank 拼到旧 group 中继续训练。
 
 ### 8.5 Rollout 通信组维护
 
-v0.1 `tensor_parallel_size=1` 时，rollout 不需要跨 GPU 通信组。Rollout pool 维护的是调度组而不是 NCCL group：
+v0.1 支持在配置层表达 rollout TP；每个 DP replica 的 `RolloutReplicaControllerActor` 维护一个 TP group：
 
-- `worker_id -> slot_id`；
+- `replica_id -> gpu_ids`；
+- `worker_id -> gpu_id`；
 - `worker_id -> active_policy_version`；
 - `worker_id -> in_flight_requests`；
 - `worker_id -> health_state`；
 - `worker_id -> precision_tag/task_pool`。
 
-未来支持 vLLM TP 时，必须引入 `RolloutGroupActor`：
+当 `tensor_parallel_size > 1` 时：
 
-- group 拥有多个 slots；
-- group 内统一创建 vLLM 通信上下文；
-- group 暴露单个 logical worker；
-- activation/drain/failure 以 group 为单位；
-- group epoch 与 slot role epoch 都要进入 request metadata。
-
-在没有 `RolloutGroupActor` 前，不应允许 `rollout.tensor_parallel_size > 1` 通过校验。
+- replica controller 统一创建 vLLM 通信上下文；
+- replica 暴露单个 logical endpoint 给 `RolloutManagerActor`；
+- activation/drain/offload/wake/failure 以 replica 为单位；
+- group epoch 与 GPU lease epoch 都要进入 request metadata。
 
 ### 8.6 Epoch 与幂等
 
 所有长生命周期动作都要带 epoch：
 
-- `slot_epoch`：slot 每次 failed/recreated/toggled 可递增；
+- `lease_epoch`：GPU active role 或 holder 每次变化时递增；
 - `role_epoch`：role unload/reload 后递增；
 - `trainer_group_epoch`：每次 FSDP2 group 重建递增；
 - `rollout_pool_epoch`：worker pool membership 改变时递增；
@@ -1074,13 +1168,13 @@ Actor method 需要具备幂等性：
 - 重复 `submit_sample(sample_id)` 不应重复训练；
 - 过期 epoch 的 `activate_weight` ack 应被忽略；
 - 过期 epoch 的 `train_step` result 不应 ack queue；
-- 重复 `toggle(target_role)` 如果状态已经满足，应返回当前状态而不是重做危险动作。
+- 重复 `grant(role, gpu_id, holder_id)` 如果状态已经满足，应返回当前 lease 而不是重做危险动作。
 
 ### 8.7 心跳与故障检测
 
 最小 heartbeat：
 
-- slot heartbeat：slot alive、active role、CUDA memory summary；
+- GPU lease heartbeat：gpu alive、active role、holder、lease epoch、CUDA memory summary；
 - trainer heartbeat：rank alive、group epoch、current step、last collective time；
 - rollout heartbeat：worker alive、active version、in-flight、tokens/s；
 - queue heartbeat：depth、token depth、pending refs、reserved refs、drop rate；
@@ -1140,11 +1234,16 @@ runtime:
     namespace: nano-rl
     gpu_manager:
       enabled: true
-      actor_per_gpu: true
-      slots:
-        rollout_only: 4
-        hybrid: 4
-        idle: 0
+      lease_manager: true
+      role_classes:
+        rollout_manager: nano_rl.runtime.roles.RolloutManagerRole
+        rollout_replica_controller: nano_rl.runtime.roles.RolloutReplicaControllerRole
+        rollout_worker: nano_rl.runtime.roles.RolloutWorkerRole
+        trainer_rank: nano_rl.runtime.roles.TrainerRankRole
+      topology:
+        rollout_only_gpus: 4
+        shared_gpus: 4
+        idle_gpus: 0
       hybrid_toggle:
         strategy: swap_on_toggle
         rollout_drain_timeout_sec: 60
@@ -1162,14 +1261,14 @@ runtime:
         num_ranks: 4
         gpus_per_rank: 1
       rollout:
-        num_actors: 8
-        gpus_per_actor: 1
-        tensor_parallel_size: 1
+        num_replicas: 4
+        gpus_per_replica: 2
+        tensor_parallel_size: 2
       reward:
         num_actors: 2
         cpus_per_actor: 4
 
-mode: collocated | disaggregated
+mode: disaggregated
 
 parallel:
   trainer:
@@ -1178,17 +1277,16 @@ parallel:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
   rollout:
-    data_parallel_size: 8
-    tensor_parallel_size: 1
+    data_parallel_size: 4
+    tensor_parallel_size: 2
 
 model:
-  source_type: hdfs_fuse_path
-  model_uri: /mnt/hdfs/models/qwen
-  tokenizer_uri: /mnt/hdfs/models/qwen
+  model_path: /mnt/hdfs/nano-ai/models/qwen
+  tokenizer_path: /mnt/hdfs/nano-ai/models/qwen
 
 data:
   source_type: hdfs_uri
-  dataset_uri: hdfs://namenode/datasets/prompts.jsonl
+  data_path: hdfs://namenode/datasets/prompts.jsonl
   prompt_column: prompt
 
 algorithm:
@@ -1236,17 +1334,19 @@ control:
 - YAML `mode=disaggregated` 归一化为 `LaunchConfig.mode=standalone_hybrid`；
 - `sync` / `async` 不作为 v0.1 用户入口别名，避免把部署形态误写成时间语义；
 - `fully_sync` / `standalone_hybrid` 不作为用户 YAML 输入值，只出现在 resolved config、日志和 FSM 内部；
-- `model.source_type` 与 `data.source_type` 必须在 `runtime.storage.allowed_input_sources` 内，且 v0.1 只允许 `hdfs_uri` / `hdfs_fuse_path`；
-- `source_type=hdfs_uri` 时，对应 URI 必须使用 `hdfs://` scheme，并通过 HDFS client 的 exists/list/read probe；
-- `source_type=hdfs_fuse_path` 时，对应路径必须是绝对路径、位于 `runtime.storage.hdfs_fuse.mount_root` 下，并通过 mount/stat/list/read probe；
-- `model.tokenizer_uri` 未填写时归一化为 `model.model_uri`，但仍要执行同一 source type 的读取校验；
+- 模型配置不包含 `source_type` 字段；`model.model_path` / `model.tokenizer_path` 按普通 artifact path 归一化，不要求 HDFS/HDFS-FUSE；
+- `data.source_type` 必须在 `runtime.storage.allowed_input_sources` 内，且 v0.1 只允许 `hdfs_uri` / `hdfs_fuse_path`；
+- `data.source_type=hdfs_uri` 时，对应 URI 必须使用 `hdfs://` scheme，并通过 HDFS client 的 exists/list/read probe；
+- `data.source_type=hdfs_fuse_path` 时，对应路径必须是绝对路径、位于 `runtime.storage.hdfs_fuse.mount_root` 下，并通过 mount/stat/list/read probe；
+- `model.tokenizer_path` 未填写时归一化为 `model.model_path`；
 - 输入 artifact 校验失败必须在 `ray.init(...)` 之前以 `InvalidInputArtifactError` fail-fast；
-- `runtime.local.num_gpus` 必须等于或大于 `rollout_only + hybrid + idle`；
-- `runtime.ray.gpu_manager.actor_per_gpu` 在 v0.1 必须为 true；
-- 归一化为 `fully_sync` 后，`rollout_only` 必须为 0，rollout 与 trainer 共用同一组 `hybrid` slots；
-- 归一化为 `standalone_hybrid` 后，`rollout_only` 与 `hybrid` 都必须大于 0，前者持续 rollout，后者在 rollout/train 窗口之间切换；
-- `runtime.ray.placement.trainer.num_ranks` 必须等于 `hybrid`；
-- `runtime.ray.placement.rollout.num_actors * gpus_per_actor` 必须等于 `rollout_only + hybrid`；
+- `runtime.local.num_gpus` 必须等于或大于 `rollout_only_gpus + shared_gpus + idle_gpus`；
+- `runtime.ray.gpu_manager.enabled` 与 `runtime.ray.gpu_manager.lease_manager` 在 v0.1 都必须为 true；
+- 归一化为 `fully_sync` 后，`rollout_only_gpus` 必须为 0，rollout 与 trainer 共用同一组 `shared_gpus`；
+- 归一化为 `standalone_hybrid` 后，`rollout_only_gpus` 与 `shared_gpus` 都必须大于 0，前者持续 rollout，后者在 rollout/train 窗口之间切换；
+- `runtime.ray.placement.trainer.num_ranks` 必须等于 `shared_gpus`；
+- `runtime.ray.placement.rollout.num_replicas * tensor_parallel_size` 必须等于 `rollout_only_gpus + shared_gpus`；
+- `rollout_only_gpus` 和 `shared_gpus` 都必须能被 rollout `tensor_parallel_size` 整除，避免一个 vLLM TP group 横跨两种生命周期区域；
 - `runtime.ray.gpu_manager.hybrid_toggle.offload.trainer_model` 与 `trainer_optimizer` 必须显式配置为 CPU residency，v0.1 推荐 `cpu_pinned`；
 - `hybrid_toggle.offload.rollout_engine=vllm_sleep` 时必须配置 `vllm_sleep_level`；若 backend 不支持 sleep/offload，resolved config 必须降级为 `teardown_and_reload` 并在 dry-run 中给出启动成本提示；
 - `hybrid_toggle.offload.residual_gpu_memory_budget_mb` 用于 offload 后的显存余量检查，允许保留 CUDA context/NCCL bookkeeping，但不得掩盖 model/optimizer/KV cache 未释放；
@@ -1277,8 +1377,8 @@ control:
 - 权重下发失败：标记版本不可用，不阻断 trainer（standalone 模式）；
 - trainer OOM：自动降 micro-batch 或触发保护性暂停。
 - Ray actor 异常退出：`ControllerActor` 根据角色类型决定重启 actor、重建 placement group 或进入 degraded 状态；
-- `GpuSlotActor` 异常退出：该 GPU slot 标记为 failed，相关 rollout worker 或 FSDP rank 整组重建；
-- hybrid toggle 超时：停止向该 slot 分发新任务，相关 group 进入 `PAUSED`，不得让 inactive role 继续执行；
+- `GpuLeaseManagerActor` 异常退出：Controller 暂停所有 CUDA 新请求，恢复 lease state 后再继续；恢复失败则相关 GPU 标记 failed；
+- shared GPU toggle 超时：停止向相关 rollout replica 或 trainer rank 分发新任务，相关 group 进入 `PAUSED`，不得让 inactive role 继续执行；
 - trainer rank 部分失败：整个 `TrainerGroup` 视为失败并整体重建，避免 FSDP2 rank 状态不一致；
 - object store 压力过高：暂停 rollout 并清理已过期 sample refs。
 
@@ -1297,17 +1397,15 @@ Checkpoint 建议：
 
 ### M1（最小可运行）
 
-- 单机 Ray runtime 下跑通 `rollout_only + hybrid` GPU slot 编排：standalone rollout 持续采样，hybrid slots 可切到 train window。
+- 单机 Ray runtime 下跑通 quantity-only GPU plan 与 `GpuLeaseManagerActor` 编排：`rollout_only_gpus` 持续采样，`shared_gpus` 可切到 train window。
 
 ### M2（standalone_hybrid）
 
-- 引入 hybrid `GpuSlotActor` toggle、Ray-native 异步队列、policy lag guard、样本 TTL、ObjectRef 背压。
+- 引入 shared GPU lease toggle、Ray-native 异步队列、policy lag guard、样本 TTL、ObjectRef 背压。
 
 ### M3（稳定性与运维）
 
 - health event、自动降级、可观测性面板；多机 Ray cluster 暂不进入 v0.1。
-
----
 
 ## 14. 建议目录结构（初始化）
 
@@ -1320,15 +1418,18 @@ nano-rl/
   requirements.txt
   LICENSE
   nano_rl/
+    config.py
     runtime/
+      controller.py
+      coordinators.py
+      roles.py
+      sample_queue.py
+      slot.py
+      weight_registry.py
       ray/
         driver.py
-        controller.py
-        gpu_slot.py
-        roles.py
-        trainer_group.py
-        rollout_pool.py
-        sample_queue.py
+        actors.py
+        placement.py
   docs/
     protocols/
       weight-meta.schema.yaml

@@ -4,23 +4,24 @@
 
 YAML 配置中的 `mode` 优先表达资源拓扑，而不是训练循环是否同步：
 
-- `collocated`：rollout 与 trainer 共用同一组 `hybrid` GPU slots，归一化为内部状态机模式 `fully_sync`
-- `disaggregated`：存在独立 `rollout_only` slots，同时 `hybrid` slots 在 rollout/train 之间切换，归一化为内部状态机模式 `standalone_hybrid`
+- `collocated`：rollout 与 trainer 共用同一组 `shared_gpus`，归一化为内部状态机模式 `fully_sync`
+- `disaggregated`：存在独立 `rollout_only_gpus`，同时 `shared_gpus` 在 rollout/train 之间切换，归一化为内部状态机模式 `standalone_hybrid`
 
 `sync` / `async` 不再作为用户入口别名，因为它们描述的是时间语义，容易掩盖 v0.1 真正需要用户选择的资源部署形态。`fully_sync` / `standalone_hybrid` 只出现在 resolved config、日志和 FSM 内部。Mode FSM 内部只处理归一化后的 canonical mode，避免状态转换逻辑同时维护两套命名。
 
-## 单机 GPU Slot 语义
+## 单机 GPU Lease 语义
 
-v0.1 只考虑单机 Ray runtime。GPU 分为两类：
+v0.1 只考虑单机 Ray runtime。用户 YAML 不手写物理 GPU id，只提供 `rollout_only_gpus`、`shared_gpus`、rollout DP/TP 和 trainer rank 数。`LaunchConfig` 展开 deterministic `ResolvedGpuPlan`：
 
-- `rollout_only`：持续做 standalone rollout，不参与 trainer rank；
-- `hybrid`：非训练窗口做 rollout，训练窗口进入 drain/release/load 流程后切换为 trainer rank。
+- `rollout_only_gpus`：只分配给 rollout actor set，训练窗口中继续 rollout；
+- `shared_gpus`：同时分配给 rollout actor set 和 trainer actor set，但同一时刻只能一个 role 持有 CUDA lease；
+- `idle_gpus`：预留 GPU，仅用于 dry-run、扩缩容或故障替补。
 
-进入 train window 时只切换 `hybrid` slots，`rollout_only` slots 不进入训练 barrier，继续向 sample queue 供样本。
+Rollout actor set 内部 GPU 不重复，trainer actor set 内部 GPU 不重复，两个 set 之间允许通过 `shared_gpus` 重叠。进入 train window 时只切换 `shared_gpus` 对应的 rollout replicas；`rollout_only_gpus` 不进入训练 barrier，继续向 sample queue 供样本。
 
-## Hybrid Slot 切换状态机
+## Shared GPU 切换状态机
 
-Hybrid slot 的状态机描述的是同一张 GPU 上 rollout role 与 trainer role 的 residency 变化。`GpuSlotActor` 是唯一能推进状态的 owner；`ControllerActor` 和两个 coordinator 只能提交 phase request，不能绕过 slot owner 直接唤醒 inactive role。
+Shared GPU 的状态机描述的是同一张 GPU 上 rollout actor 与 trainer actor 的 residency 变化。`GpuLeaseManagerActor` 是 active-role lease owner；`ControllerActor`、`RolloutManagerActor` 和 `TrainerCoordinatorActor` 只能提交 phase request，不能绕过 lease owner 直接唤醒 inactive role。`rollout_only_gpus` 收到 trainer lease 请求必须 fail-fast 返回 unsupported role。
 
 ```text
 ROLLOUT_ACTIVE
@@ -42,12 +43,12 @@ ROLLOUT_ACTIVE
 - `ROLLOUT_DRAINING`：停止接新 prompt，等待 in-flight generation 完成或按 deadline 取消，已完成样本 flush 到 `SampleQueueActor`。
 - `ROLLOUT_OFFLOADING_CPU`：释放 rollout CUDA residency。优先使用 vLLM sleep/offload；不支持时 teardown engine 并保留 `RolloutStateHandle`。
 - `TRAIN_HYDRATING_GPU`：从 CPU `TrainStateBundle` 恢复 FSDP2 model shard、optimizer state、scheduler/RNG/scaler 到 GPU。
-- `TRAIN_READY_BARRIER`：所有 hybrid ranks 使用相同 `comm_epoch` 到达 train enter barrier；少一个 rank 就 fail-fast。
+- `TRAIN_READY_BARRIER`：所有 trainer ranks 使用相同 `comm_epoch` 到达 train enter barrier；少一个 rank 就 fail-fast。
 - `TRAIN_ACTIVE`：只允许 trainer 发起 CUDA kernel 和 FSDP/NCCL collective，rollout role 保持 paused。
 - `TRAIN_DRAINING`：完成当前 micro-step，等待 async collective work，进入 train exit barrier。
 - `TRAIN_OFFLOADING_CPU`：model shard 与 optimizer state 回到 CPU standby，释放 CUDA tensors/cache，但不销毁 trainer process group。
 - `ROLLOUT_WAKING_GPU`：按目标 `WeightMeta` wake/reload vLLM weights，再分配 KV cache 预算。
-- `ROLLOUT_READY_BARRIER`：rollout-capable slots 完成版本激活后，`RolloutCoordinatorActor` 才恢复发 prompt。
+- `ROLLOUT_READY_BARRIER`：rollout replicas 完成版本激活后，`RolloutManagerActor` 才恢复发 prompt。
 
 ## 通信组保护规则
 
@@ -62,7 +63,7 @@ FSDP2 的 process group 生命周期长于一次 train window。正常 role togg
 
 保留 process group 时可能保留少量 CUDA context/NCCL bookkeeping 显存。正常 offload 的目标是释放 model、optimizer、activation、KV cache 等大块 residency；如果 `cuda_quiesce_timeout_sec` 后 residual GPU memory 超过预算，应视为 offload 失败，而不是在正常 toggle 路径上销毁 process group。
 
-Rollout 侧通信资源与 trainer 通信资源分离。v0.1 默认 `tensor_parallel_size=1`；未来若 vLLM tensor parallel 大于 1，必须由 `RolloutGroupActor` 以组为单位 sleep/wake/offload，不允许把 rollout group 与 FSDP2 group 合并。
+Rollout 侧通信资源与 trainer 通信资源分离。v0.1 在配置层支持 rollout tensor parallel；每个 `RolloutReplicaControllerActor` 管理一个 DP replica 的 vLLM TP group，并以 replica 为单位 sleep/wake/offload，不允许把 rollout group 与 FSDP2 group 合并。
 
 ## 状态定义
 
@@ -76,7 +77,7 @@ Rollout 侧通信资源与 trainer 通信资源分离。v0.1 默认 `tensor_para
 ## 状态转换
 
 1. `BOOTSTRAP -> FULLY_SYNC_ACTIVE`
-   - 条件：`mode=fully_sync` 且 `TrainerGroup` / `RolloutActorPool` 健康
+   - 条件：`mode=fully_sync` 且 `TrainerGroup` / `RolloutManagerActor` 健康
 2. `BOOTSTRAP -> STANDALONE_HYBRID_ACTIVE`
    - 条件：`mode=standalone_hybrid` 且 `SampleQueueActor` + `WeightRegistryActor` 健康
 3. `STANDALONE_HYBRID_ACTIVE -> DEGRADED_SYNC`

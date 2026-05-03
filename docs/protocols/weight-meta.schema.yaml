@@ -1,17 +1,14 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: WeightMeta
 type: object
-required: [version_id, created_at, source_type, model_uri, format, checksum]
+required: [version_id, created_at, model_path, format, checksum]
 properties:
   version_id: { type: integer, minimum: 0 }
   parent_version: { type: integer, minimum: 0 }
   trainer_step: { type: integer, minimum: 0 }
   created_at: { type: string, format: date-time }
-  source_type:
-    type: string
-    enum: [hdfs_uri, hdfs_fuse_path]
-  model_uri: { type: string, minLength: 1 }
-  tokenizer_uri: { type: string, minLength: 1 }
+  model_path: { type: string, minLength: 1 }
+  tokenizer_path: { type: string, minLength: 1 }
   artifact_uri: { type: string, minLength: 1 }
   manifest_uri: { type: string, minLength: 1 }
   format:
@@ -24,22 +21,3 @@ properties:
   status:
     type: string
     enum: [registered, activating, active_global, failed, deprecated]
-allOf:
-  - if:
-      properties:
-        source_type: { const: hdfs_uri }
-    then:
-      properties:
-        model_uri: { pattern: "^hdfs://" }
-        tokenizer_uri: { pattern: "^hdfs://" }
-        artifact_uri: { pattern: "^hdfs://" }
-        manifest_uri: { pattern: "^hdfs://" }
-  - if:
-      properties:
-        source_type: { const: hdfs_fuse_path }
-    then:
-      properties:
-        model_uri: { pattern: "^/" }
-        tokenizer_uri: { pattern: "^/" }
-        artifact_uri: { pattern: "^/" }
-        manifest_uri: { pattern: "^/" }
