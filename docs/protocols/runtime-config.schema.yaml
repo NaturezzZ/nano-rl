@@ -6,12 +6,16 @@ properties:
   run:
     type: object
     required: [intent]
+    description: Runtime intent and startup switches. train builds the Ray launch plan in all cases; start_ray_actors gates whether the real Ray actor graph is started.
     properties:
       intent:
         type: string
         enum: [train, dry_run, validate]
       emit_resolved_config:
         type: boolean
+      start_ray_actors:
+        type: boolean
+        description: When false, train emits a backend-integrated launch plan without creating Ray actors. When true, RayDriver starts the Ray actor graph and actor wrappers construct vLLM/FSDP2 backend adapters lazily.
   runtime:
     type: object
     required: [backend, local, storage, ray]
@@ -208,6 +212,7 @@ properties:
   trainer:
     type: object
     required: [backend, global_batch_size, fsdp2]
+    description: Trainer runtime configuration. Real FSDP2 weight export needs a checkpoint_dir and multi-rank execution also needs process-group rendezvous metadata from the actor runtime.
     properties:
       backend:
         type: string
@@ -215,6 +220,10 @@ properties:
       global_batch_size:
         type: integer
         minimum: 1
+      checkpoint_dir:
+        type: string
+        minLength: 1
+        description: Directory used by the rank-0 FSDP2 backend to write versioned checkpoints that rollout/vLLM can reload.
       fsdp2:
         type: object
         required: [mixed_precision, sharding]

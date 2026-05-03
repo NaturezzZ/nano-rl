@@ -442,6 +442,10 @@
           <h3>Data plane</h3>
           <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 指向 backend loader 可读取的模型或 checkpoint artifact，不把大权重放进 Ray object store。</p>
         </div>
+        <div class="box">
+          <h3>Execution backends</h3>
+          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph。</p>
+        </div>
       </div>
     </section>
 
@@ -665,7 +669,7 @@
 
           <rect x="38" y="660" width="1060" height="132" class="svg-box svg-red"></rect>
           <text x="64" y="692" class="svg-label">Guard rails</text>
-          <text x="64" y="718" class="svg-small">fully_sync: max_policy_lag=0，所有 workers 必须激活同一个 W_t 才开始 rollout。</text>
+          <text x="64" y="718" class="svg-small">fully_sync: max_policy_lag=0，所有 rollout replicas 必须激活同一个 W_t 才开始 rollout。</text>
           <text x="64" y="744" class="svg-small">standalone_hybrid: rollout_only_gpus 训练窗口内继续生成，但 SampleQueue 必须用 policy lag、TTL、水位和 ObjectRef 上限过滤。</text>
           <text x="64" y="770" class="svg-small">任何 hydrate/offload/barrier/activation 失败或 lease epoch 过期都不能让部分 actors 继续推进。</text>
         </svg>
@@ -735,11 +739,11 @@
         </div>
         <div class="box">
           <h3>FSDP2 Trainer</h3>
-          <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 执行 PPO-like forward/backward、optimizer step、checkpoint/export。queue ack 必须晚于 optimizer step 成功。</p>
+          <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 已接入 <code>Fsdp2TrainerBackend</code> adapter。真实 FSDP2 执行依赖可加载模型、<code>trainer.checkpoint_dir</code> 与多 rank rendezvous/store endpoint；queue ack 必须晚于 optimizer step 成功。</p>
         </div>
         <div class="box">
           <h3>vLLM Rollout</h3>
-          <p><code>RolloutManagerActor</code> 选择 prompt 与 target policy version，分发到 rollout DP replicas。每个 <code>RolloutReplicaControllerActor</code> 管理一个 vLLM TP group，<code>RolloutWorkerActor</code> 生成 response、tokens 和 PPO 所需 old logprobs。</p>
+          <p><code>RolloutManagerActor</code> 选择 prompt 与 target policy version，分发到 rollout DP replicas。每个 <code>RolloutReplicaControllerActor</code> 按 TP 组持有 <code>rollout_gpu_i</code> custom resources，并通过 <code>VllmRolloutBackend</code> adapter 激活权重和生成 response。</p>
         </div>
         <div class="box">
           <h3><code>SampleQueueActor</code></h3>
@@ -765,7 +769,7 @@
       <p>
         这里按当前设计列出所有 actor 或 actor-like role。关键约束是：rollout 和 trainer execution actors 是独立故障域，集合内部 GPU 不重复，集合之间可以通过 <code>shared_gpus</code> overlap。
         长生命周期 rollout/train actor 不用 Ray <code>num_gpus=1</code> 表达互斥，而是用 role-scoped logical resources 加 <code>GpuLeaseManagerActor</code> lease gate。
-        dry-run 会输出 <code>ray_launch_plan</code>：其中 <code>node_custom_resources</code> 同时声明 shared GPU 的 <code>rollout_gpu_i</code> 与 <code>train_gpu_i</code>，actor specs 保持 <code>num_gpus=0</code>。
+        dry-run 会输出 <code>ray_launch_plan</code>：其中 <code>node_custom_resources</code> 同时声明 shared GPU 的 <code>rollout_gpu_i</code> 与 <code>train_gpu_i</code>，rollout replica actor 按 TP 组占用 <code>rollout_gpu_i</code> custom resources，所有长生命周期 actor specs 保持 <code>num_gpus=0</code>。
       </p>
       <table>
         <thead>
@@ -797,15 +801,15 @@
           </tr>
           <tr>
             <td><code>RolloutReplicaControllerActor</code></td>
-            <td>CPU actor</td>
-            <td>每个 rollout DP replica 一个；管理 vLLM TP group、权重激活、drain/offload/wake 和 replica failure。</td>
-            <td>接收 <code>RolloutManagerActor</code> 请求；协调多个 TP workers；以 replica 为单位 ack activation。</td>
+            <td>TP group logical rollout GPU resources</td>
+            <td>每个 rollout DP replica 一个；按 TP 组占用 <code>rollout_gpu_i</code> custom resources，构造 vLLM backend adapter，管理权重激活、drain/offload/wake 和 replica failure。</td>
+            <td>接收 <code>RolloutManagerActor</code> 请求；协调多个 TP workers；以 replica 为单位 ack activation；执行 CUDA 前校验 rollout leases。</td>
           </tr>
           <tr>
             <td><code>RolloutWorkerActor</code></td>
-            <td>logical rollout GPU resource</td>
-            <td>每个 vLLM TP rank 一个；运行 vLLM worker/shard，维护 KV cache、CUDA residency、TP rank 状态。</td>
-            <td>执行 CUDA 前校验 rollout lease；生成 tokens/logprobs；调用 reward 或提交 sample refs。</td>
+            <td><code>num_gpus=0</code> TP rank role</td>
+            <td>每个 vLLM TP rank 一个；不申请 Ray GPU token，维护 TP rank 元数据和未来 worker/shard 边界。</td>
+            <td>CUDA-facing 行为必须通过 rollout lease 与 replica/backend gate；不单独抢占 <code>rollout_gpu_i</code> resource。</td>
           </tr>
           <tr>
             <td><code>TrainerCoordinatorActor</code></td>

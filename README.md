@@ -7,7 +7,7 @@ A tiny but complete RL framework blueprint focused on:
 - single-machine Ray-native actor execution runtime
 - collocated and disaggregated execution profiles, normalized to fully-sync and standalone+hybrid internal modes
 
-This repository is currently in design-first stage.
+This repository is currently in a design-first / early backend-integrated stage.
 
 ## Current Implementation
 
@@ -20,7 +20,16 @@ The initial Python runtime skeleton now includes:
 - `nano_rl.runtime.weight_registry`: in-memory `WeightRegistryActor` core.
 - `nano_rl.runtime.coordinators`: rollout manager backlog/pump core and trainer coordinator core.
 - `nano_rl.runtime.controller`: dry-run controller plan and local smoke iteration.
-- `nano_rl.runtime.ray`: Ray driver boundary, CPU actor wrappers, and custom-resource launch plan.
+- `nano_rl.runtime.offload`: shared GPU residency/offload/hydrate state machine.
+- `nano_rl.runtime.backends`: lazy-import vLLM rollout and FSDP2 trainer backend adapters with fake test backends.
+- `nano_rl.runtime.ray`: Ray driver boundary, CPU actor wrappers that own backend adapters, actor graph launcher, and custom-resource launch plan.
+
+`RayDriver.train()` always builds the resolved runtime and Ray launch plan. By
+default the example configs set `run.start_ray_actors: false`, so training emits
+the backend-integrated plan without creating long-lived Ray actors. Setting
+`run.start_ray_actors: true` starts the Ray actor graph; real vLLM/FSDP2
+execution then requires Ray, vLLM, PyTorch/FSDP2, model artifacts,
+`trainer.checkpoint_dir`, and trainer rendezvous metadata to be ready.
 
 Local validation:
 

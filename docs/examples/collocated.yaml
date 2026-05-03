@@ -3,6 +3,9 @@
 run:
   intent: train
   emit_resolved_config: true
+  # Keep false for config/dry-run validation. Set true only when Ray, vLLM,
+  # PyTorch/FSDP2, model artifacts, checkpoint storage, and rendezvous are ready.
+  start_ray_actors: false
 
 runtime:
   backend: ray
@@ -88,6 +91,8 @@ algorithm:
 trainer:
   backend: fsdp2
   global_batch_size: 1024
+  # Rank 0 exports versioned FSDP2 checkpoints here for rollout/vLLM reload.
+  checkpoint_dir: /tmp/nano-rl-checkpoints
   fsdp2:
     mixed_precision: bf16
     sharding: full_shard

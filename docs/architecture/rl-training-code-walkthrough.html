@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nano-rl RL 训练流程代码走读</title>
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #667085;
+      --line: #d9dee8;
+      --accent: #0f766e;
+      --accent-2: #2563eb;
+      --warn: #b45309;
+      --bad: #b42318;
+      --good: #157347;
+      --code-bg: #111827;
+      --code-fg: #f9fafb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.68;
+    }
+
+    a {
+      color: var(--accent-2);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code {
+      padding: 0.12rem 0.34rem;
+      border: 1px solid rgba(15, 118, 110, 0.16);
+      border-radius: 5px;
+      background: rgba(15, 118, 110, 0.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 14px 0;
+      padding: 14px 16px;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-fg);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    pre code {
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+    }
+
+    .shell {
+      width: min(1220px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    .hero {
+      padding: 30px 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      max-width: 940px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .meta-grid,
+    .highlight-grid,
+    .component-grid,
+    .evidence-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .meta-grid {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      margin-top: 22px;
+    }
+
+    .highlight-grid {
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      margin-top: 14px;
+    }
+
+    .meta-card,
+    .highlight-card,
+    .component-card,
+    .evidence-card {
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .meta-label,
+    .highlight-label,
+    .card-label {
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .meta-value,
+    .highlight-value,
+    .card-value {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .good {
+      border-color: rgba(21, 115, 71, 0.3);
+      background: rgba(21, 115, 71, 0.06);
+    }
+
+    .warn {
+      border-color: rgba(180, 83, 9, 0.34);
+      background: rgba(180, 83, 9, 0.07);
+    }
+
+    .bad {
+      border-color: rgba(180, 35, 24, 0.32);
+      background: rgba(180, 35, 24, 0.06);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 270px minmax(0, 1fr);
+      gap: 20px;
+      margin-top: 20px;
+    }
+
+    .toc {
+      position: sticky;
+      top: 16px;
+      align-self: start;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .toc h2 {
+      margin: 0 0 12px;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .toc ol {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .toc li + li {
+      margin-top: 8px;
+    }
+
+    .content {
+      display: grid;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    section.panel {
+      padding: 24px 26px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: clamp(22px, 2.2vw, 31px);
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 20px 0 8px;
+      font-size: 18px;
+      line-height: 1.3;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    ul,
+    ol {
+      margin: 0 0 12px;
+      padding-left: 22px;
+    }
+
+    li + li {
+      margin-top: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eef2f7;
+      font-weight: 700;
+    }
+
+    .callout {
+      margin: 14px 0;
+      padding: 12px 14px;
+      border: 1px solid rgba(15, 118, 110, 0.22);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: rgba(15, 118, 110, 0.06);
+    }
+
+    .diagram {
+      overflow-x: auto;
+      margin: 16px 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .diagram svg {
+      display: block;
+      min-width: 820px;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .flow-list {
+      display: grid;
+      gap: 10px;
+      counter-reset: flow-step;
+    }
+
+    .flow-step {
+      position: relative;
+      padding: 12px 14px 12px 46px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      counter-increment: flow-step;
+    }
+
+    .flow-step::before {
+      content: counter(flow-step);
+      position: absolute;
+      left: 14px;
+      top: 14px;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 22px;
+      text-align: center;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .status.good {
+      color: var(--good);
+    }
+
+    .status.warn {
+      color: var(--warn);
+    }
+
+    .status.bad {
+      color: var(--bad);
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 920px) {
+      .shell {
+        width: min(100vw - 22px, 1220px);
+      }
+
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+      }
+
+      section.panel,
+      .hero {
+        padding: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">Code Walkthrough</p>
+      <h1>nano-rl RL 训练流程代码走读</h1>
+      <p class="subtitle">这份报告按当前仓库内容展开，从 YAML 配置入口、GPU 拓扑自动分配、Ray actor graph、vLLM/FSDP2 backend adapter、rollout 采样、SampleQueue、train window、权重发布与回切，完整走读一轮 RL 训练在代码里如何被表达。</p>
+      <div class="meta-grid">
+        <article class="meta-card">
+          <p class="meta-label">生成时间</p>
+          <p class="meta-value">2026-05-03 13:10:51 CST</p>
+        </article>
+        <article class="meta-card">
+          <p class="meta-label">仓库</p>
+          <p class="meta-value">~/nano-ai/nano-rl</p>
+        </article>
+        <article class="meta-card">
+          <p class="meta-label">当前 commit</p>
+          <p class="meta-value">10676fa</p>
+        </article>
+        <article class="meta-card">
+          <p class="meta-label">验证</p>
+          <p class="meta-value"><code>python3 -m pytest -q</code>：72 passed</p>
+        </article>
+      </div>
+      <div class="highlight-grid">
+        <article class="highlight-card good">
+          <p class="highlight-label">主线已连通</p>
+          <p class="highlight-value">本地 deterministic smoke path 已能跑通 config、lease、rollout、queue、train、weight publish。</p>
+        </article>
+        <article class="highlight-card good">
+          <p class="highlight-label">GPU 共享模型</p>
+          <p class="highlight-value">YAML 只给数量，系统自动展开物理 GPU；rollout/train 可共享同一 GPU，但长驻 Ray actor 不申请 <code>num_gpus=1</code>。</p>
+        </article>
+        <article class="highlight-card warn">
+          <p class="highlight-label">后端接线状态</p>
+          <p class="highlight-value">Ray actor 已接入 vLLM/FSDP2 backend adapter；真实 GPU 运行仍依赖环境、模型 artifact、checkpoint 与 rendezvous。</p>
+        </article>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="toc">
+        <h2>Contents</h2>
+        <ol>
+          <li><a href="#summary">当前实现摘要</a></li>
+          <li><a href="#code-map">代码地图</a></li>
+          <li><a href="#config">从 YAML 到 LaunchConfig</a></li>
+          <li><a href="#gpu">GPU 拓扑与共享 GPU</a></li>
+          <li><a href="#ray">Ray actor 启动图</a></li>
+          <li><a href="#iteration">一轮 RL 训练流程</a></li>
+          <li><a href="#rollout">Rollout 子系统</a></li>
+          <li><a href="#queue-registry">Queue 与权重注册表</a></li>
+          <li><a href="#trainer">Trainer 与 train window</a></li>
+          <li><a href="#backends">vLLM / FSDP2 后端边界</a></li>
+          <li><a href="#tests">测试覆盖与成熟度</a></li>
+          <li><a href="#reading">建议阅读顺序</a></li>
+        </ol>
+      </nav>
+
+      <div class="content">
+        <section class="panel" id="summary">
+          <h2>当前实现摘要</h2>
+          <p>当前仓库已经不是纯设计文档状态，而是一个 <strong>设计优先、早期后端接线</strong> 的 Python runtime。主入口 <a href="../../main.py"><code>main.py</code></a> 负责读取 YAML、校验并生成 <code>LaunchConfig</code>；<a href="../../nano_rl/runtime/controller.py"><code>ControllerCore</code></a> 负责把本地可测试的 rollout、queue、trainer、weight registry、GPU lease/offload 串起来；Ray 层已经把 actor graph、资源放置和 vLLM/FSDP2 backend adapter 接起来。</p>
+          <p>要注意一点：<code>RayDriver.train()</code> 的启动语义由 YAML 控制。<code>run.start_ray_actors: false</code> 时返回规划后的 backend-integrated runtime plan；<code>run.start_ray_actors: true</code> 时才会启动真实 Ray actor graph。actor wrapper 会懒构造 <code>VllmRolloutBackend</code> 和 <code>Fsdp2TrainerBackend</code>，但 CPU-only 最完整的端到端训练形态仍是 <a href="../../scripts/smoke_local_runtime.py"><code>scripts/smoke_local_runtime.py</code></a> 的 deterministic local iteration。</p>
+          <div class="callout">
+            <strong>结论：</strong>现在的代码已经把交互协议、状态机、资源规划、Ray actor graph 和 backend adapter 连起来了；真实 GPU 训练还需要满足 Ray/vLLM/PyTorch/FSDP2 依赖、模型与 checkpoint artifact，以及多 rank rendezvous。
+          </div>
+        </section>
+
+        <section class="panel" id="code-map">
+          <h2>代码地图</h2>
+          <div class="component-grid">
+            <article class="component-card">
+              <p class="card-label">入口层</p>
+              <p class="card-value"><a href="../../main.py"><code>main.py</code></a>：CLI 入口，加载 YAML，按 <code>run.intent</code> 调用 <code>RayDriver.validate/dry_run/train</code>。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">配置层</p>
+              <p class="card-value"><a href="../../nano_rl/config.py"><code>nano_rl/config.py</code></a>：Pydantic schema、跨字段校验、模式归一化、GPU plan 自动展开。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">控制层</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/controller.py"><code>ControllerCore</code></a>：把 rollout、train、queue、registry、lease、residency 组合成一轮训练。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">GPU 状态</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/slot.py"><code>slot.py</code></a> 管 lease；<a href="../../nano_rl/runtime/offload.py"><code>offload.py</code></a> 管共享 GPU 在 rollout/train 之间的 residency 切换。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">数据协议</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/protocols.py"><code>protocols.py</code></a> 定义 <code>WeightMeta</code>、<code>SampleRecord</code>、<code>TrainBatch</code>、<code>TrainStats</code>、<code>HealthEvent</code>。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">Ray 边界</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/ray/placement.py"><code>placement.py</code></a> 生成 actor/resource plan；<a href="../../nano_rl/runtime/ray/launcher.py"><code>launcher.py</code></a> 启动 actor graph。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">Rollout/Train 角色</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/roles.py"><code>roles.py</code></a> 提供 deterministic role adapters，当前 smoke path 用它们模拟 rollout 和 trainer rank；Ray actor 路径则优先走 backend adapter。</p>
+            </article>
+            <article class="component-card">
+              <p class="card-label">后端 adapter</p>
+              <p class="card-value"><a href="../../nano_rl/runtime/backends/vllm_backend.py"><code>vllm_backend.py</code></a> 与 <a href="../../nano_rl/runtime/backends/fsdp2_backend.py"><code>fsdp2_backend.py</code></a> 已被 Ray actor wrapper 调用，是真实 CUDA 路径的接入点。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="config">
+          <h2>从 YAML 到 LaunchConfig</h2>
+          <p>用户启动路径是 YAML-first：训练参数、拓扑、role class、并行维度都在 <a href="../../docs/examples/disaggregated.yaml"><code>docs/examples/disaggregated.yaml</code></a> 或 <a href="../../docs/examples/collocated.yaml"><code>docs/examples/collocated.yaml</code></a> 中描述，CLI 不提供逐字段覆盖。</p>
+          <div class="flow-list">
+            <div class="flow-step"><strong><code>main.py</code> 读取配置。</strong> <code>load_launch_config(args.config)</code> 先用 <code>yaml.safe_load</code> 读 YAML，再用 <code>RuntimeConfig.model_validate</code> 做结构化校验。</div>
+            <div class="flow-step"><strong>用户模式归一化。</strong> 用户只写 <code>collocated</code> 或 <code>disaggregated</code>；内部 canonical mode 分别是 <code>fully_sync</code> 和 <code>standalone_hybrid</code>。</div>
+            <div class="flow-step"><strong>跨字段约束。</strong> <code>RuntimeConfig._validate_cross_fields()</code> 校验 <code>trainer.num_ranks == shared_gpus</code>、<code>rollout.num_replicas * gpus_per_replica == rollout_only_gpus + shared_gpus</code>、TP 分组可整除、FSDP world size 对齐等。</div>
+            <div class="flow-step"><strong>GPU plan 自动展开。</strong> <code>LaunchConfig.from_runtime_config()</code> 调用 <code>_build_gpu_plan()</code>，把数量型 YAML 展开成 <code>rollout_replicas</code>、<code>rollout_workers</code>、<code>trainer_ranks</code>。</div>
+            <div class="flow-step"><strong>启动开关。</strong> <code>run.start_ray_actors</code> 是是否真正创建 Ray actor graph 的唯一 YAML 开关；示例默认 <code>false</code>，但仍会生成带 vLLM/FSDP2 adapter 参数的 <code>ray_launch_plan</code>。</div>
+            <div class="flow-step"><strong>checkpoint 位置。</strong> <code>trainer.checkpoint_dir</code> 进入每个 <code>TrainerRankActor</code> 的 backend config，rank0/exporter 用它写出 versioned checkpoint 供 rollout/vLLM reload。</div>
+          </div>
+          <p>这正好对应你前面要求的“不要手动指定 gpu id，只给数量”。例如 disaggregated 示例只写 <code>rollout_only_gpus: 4</code>、<code>shared_gpus: 4</code>、<code>rollout.data_parallel_size: 4</code>、<code>rollout.tensor_parallel_size: 2</code>、<code>trainer.num_ranks: 4</code>。运行 resolved config 后，系统决定具体映射：</p>
+          <pre><code>rollout-dp-0: gpu0, gpu1     rollout_only
+rollout-dp-1: gpu2, gpu3     rollout_only
+rollout-dp-2: gpu4, gpu5     shared with trainer
+rollout-dp-3: gpu6, gpu7     shared with trainer
+
+trainer-rank-0: gpu4
+trainer-rank-1: gpu5
+trainer-rank-2: gpu6
+trainer-rank-3: gpu7</code></pre>
+        </section>
+
+        <section class="panel" id="gpu">
+          <h2>GPU 拓扑与共享 GPU</h2>
+          <p>当前实现没有继续使用“一个 heavy <code>GpuSlotActor(num_gpus=1)</code> 托管 rollout/train role”的模型。取而代之的是两个更明确的层次：</p>
+          <ul>
+            <li><strong>放置层：</strong>Ray custom resources，例如 <code>rollout_gpu_4</code> 和 <code>train_gpu_4</code>。rollout 之间不重复，trainer 之间不重复；但 rollout 和 trainer 可以被系统安排到同一个物理 GPU id。</li>
+            <li><strong>执行门控层：</strong><code>GpuLeaseManagerCore</code> 记录每张 GPU 当前 active role、holder、lease epoch。只有持有当前 lease 的 role 才能执行 CUDA 相关工作。</li>
+          </ul>
+          <div class="diagram" aria-label="GPU 拓扑图">
+            <svg viewBox="0 0 980 270" role="img">
+              <defs>
+                <style>
+                  .t { font: 13px system-ui, sans-serif; fill: #17202a; }
+                  .m { font: 12px system-ui, sans-serif; fill: #667085; }
+                  .box { fill: #fff; stroke: #d9dee8; rx: 8; }
+                  .roll { fill: #e0f2fe; stroke: #0284c7; rx: 8; }
+                  .train { fill: #dcfce7; stroke: #16a34a; rx: 8; }
+                  .shared { fill: #fef3c7; stroke: #d97706; rx: 8; }
+                  .line { stroke: #98a2b3; stroke-width: 1.5; }
+                </style>
+              </defs>
+              <text class="t" x="20" y="28">disaggregated 示例：8 张物理 GPU，前 4 张 rollout-only，后 4 张 shared</text>
+              <g transform="translate(20,52)">
+                <rect class="roll" x="0" y="0" width="100" height="52"></rect>
+                <text class="t" x="16" y="22">gpu0</text>
+                <text class="m" x="16" y="42">rollout tp0</text>
+                <rect class="roll" x="112" y="0" width="100" height="52"></rect>
+                <text class="t" x="128" y="22">gpu1</text>
+                <text class="m" x="128" y="42">rollout tp1</text>
+                <rect class="roll" x="224" y="0" width="100" height="52"></rect>
+                <text class="t" x="240" y="22">gpu2</text>
+                <text class="m" x="240" y="42">rollout tp0</text>
+                <rect class="roll" x="336" y="0" width="100" height="52"></rect>
+                <text class="t" x="352" y="22">gpu3</text>
+                <text class="m" x="352" y="42">rollout tp1</text>
+                <rect class="shared" x="448" y="0" width="100" height="52"></rect>
+                <text class="t" x="464" y="22">gpu4</text>
+                <text class="m" x="464" y="42">shared</text>
+                <rect class="shared" x="560" y="0" width="100" height="52"></rect>
+                <text class="t" x="576" y="22">gpu5</text>
+                <text class="m" x="576" y="42">shared</text>
+                <rect class="shared" x="672" y="0" width="100" height="52"></rect>
+                <text class="t" x="688" y="22">gpu6</text>
+                <text class="m" x="688" y="42">shared</text>
+                <rect class="shared" x="784" y="0" width="100" height="52"></rect>
+                <text class="t" x="800" y="22">gpu7</text>
+                <text class="m" x="800" y="42">shared</text>
+              </g>
+              <g transform="translate(20,130)">
+                <rect class="box" x="0" y="0" width="212" height="45"></rect>
+                <text class="t" x="16" y="27">rollout-dp-0: gpu0,gpu1</text>
+                <rect class="box" x="224" y="0" width="212" height="45"></rect>
+                <text class="t" x="240" y="27">rollout-dp-1: gpu2,gpu3</text>
+                <rect class="box" x="448" y="0" width="212" height="45"></rect>
+                <text class="t" x="464" y="27">rollout-dp-2: gpu4,gpu5</text>
+                <rect class="box" x="672" y="0" width="212" height="45"></rect>
+                <text class="t" x="688" y="27">rollout-dp-3: gpu6,gpu7</text>
+              </g>
+              <g transform="translate(468,202)">
+                <rect class="train" x="0" y="0" width="88" height="42"></rect>
+                <text class="t" x="10" y="26">rank0</text>
+                <rect class="train" x="112" y="0" width="88" height="42"></rect>
+                <text class="t" x="122" y="26">rank1</text>
+                <rect class="train" x="224" y="0" width="88" height="42"></rect>
+                <text class="t" x="234" y="26">rank2</text>
+                <rect class="train" x="336" y="0" width="88" height="42"></rect>
+                <text class="t" x="346" y="26">rank3</text>
+              </g>
+            </svg>
+          </div>
+          <p>为什么这样实现？Ray 的 <code>num_gpus</code> token 是独占调度资源，不适合两个长驻 actor 同时“声称”自己占有同一张卡。当前代码把 Ray token 拆成 role-specific custom resource，让 placement 可表达“rollout 集合内不重复、trainer 集合内不重复、rollout/train 可重叠”，然后用 <code>GpuLeaseManagerCore.assert_active()</code> 和 lease epoch 做运行时互斥。</p>
+        </section>
+
+        <section class="panel" id="ray">
+          <h2>Ray actor 启动图</h2>
+          <p><a href="../../nano_rl/runtime/ray/placement.py"><code>build_ray_launch_plan()</code></a> 生成声明式 <code>RayLaunchPlan</code>，里面有 CPU 控制 actor、rollout replica/controller/worker、trainer rank、reward、queue、registry、metrics。<a href="../../nano_rl/runtime/ray/launcher.py"><code>RayActorGraphLauncher</code></a> 再把它转成真实 Ray actor graph。</p>
+          <div class="diagram" aria-label="Ray actor 图">
+            <svg viewBox="0 0 980 430" role="img">
+              <defs>
+                <style>
+                  .t { font: 13px system-ui, sans-serif; fill: #17202a; }
+                  .h { font: 16px system-ui, sans-serif; font-weight: 700; fill: #17202a; }
+                  .m { font: 12px system-ui, sans-serif; fill: #667085; }
+                  .cpu { fill: #f8fafc; stroke: #94a3b8; rx: 8; }
+                  .gpu { fill: #eff6ff; stroke: #2563eb; rx: 8; }
+                  .state { fill: #ecfdf3; stroke: #16a34a; rx: 8; }
+                  .arrow { stroke: #667085; stroke-width: 1.6; marker-end: url(#arrow); }
+                </style>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#667085"></path>
+                </marker>
+              </defs>
+              <text class="h" x="20" y="30">Ray actor/resource plan</text>
+              <rect class="cpu" x="20" y="58" width="170" height="58"></rect>
+              <text class="t" x="40" y="82">ControllerActor</text>
+              <text class="m" x="40" y="102">loop semantics</text>
+              <rect class="state" x="230" y="58" width="170" height="58"></rect>
+              <text class="t" x="250" y="82">GpuLeaseManager</text>
+              <text class="m" x="250" y="102">active role / epoch</text>
+              <rect class="cpu" x="440" y="58" width="170" height="58"></rect>
+              <text class="t" x="460" y="82">RolloutManager</text>
+              <text class="m" x="460" y="102">backlog / dispatch</text>
+              <rect class="cpu" x="650" y="58" width="170" height="58"></rect>
+              <text class="t" x="670" y="82">TrainerCoordinator</text>
+              <text class="m" x="670" y="102">world size / reserve</text>
+
+              <rect class="cpu" x="20" y="162" width="170" height="58"></rect>
+              <text class="t" x="40" y="186">SampleQueue</text>
+              <text class="m" x="40" y="206">TTL / lag / lease</text>
+              <rect class="cpu" x="230" y="162" width="170" height="58"></rect>
+              <text class="t" x="250" y="186">WeightRegistry</text>
+              <text class="m" x="250" y="206">version / activation</text>
+              <rect class="cpu" x="440" y="162" width="170" height="58"></rect>
+              <text class="t" x="460" y="186">RewardActor x N</text>
+              <text class="m" x="460" y="206">score samples</text>
+              <rect class="cpu" x="650" y="162" width="170" height="58"></rect>
+              <text class="t" x="670" y="186">MetricsActor</text>
+              <text class="m" x="670" y="206">health events</text>
+
+              <rect class="gpu" x="20" y="278" width="250" height="58"></rect>
+              <text class="t" x="40" y="302">RolloutReplicaController x DP</text>
+              <text class="m" x="40" y="322">resources: rollout_gpu_i per TP group</text>
+              <rect class="gpu" x="320" y="278" width="250" height="58"></rect>
+              <text class="t" x="340" y="302">RolloutWorker x DP*TP</text>
+              <text class="m" x="340" y="322">TP rank role, num_gpus=0</text>
+              <rect class="gpu" x="620" y="278" width="250" height="58"></rect>
+              <text class="t" x="640" y="302">TrainerRank x shared_gpus</text>
+              <text class="m" x="640" y="322">resources: train_gpu_i, num_gpus=0</text>
+
+              <line class="arrow" x1="190" y1="87" x2="230" y2="87"></line>
+              <line class="arrow" x1="400" y1="87" x2="440" y2="87"></line>
+              <line class="arrow" x1="610" y1="87" x2="650" y2="87"></line>
+              <line class="arrow" x1="525" y1="116" x2="160" y2="278"></line>
+              <line class="arrow" x1="735" y1="220" x2="735" y2="278"></line>
+              <line class="arrow" x1="105" y1="220" x2="105" y2="278"></line>
+              <line class="arrow" x1="315" y1="220" x2="315" y2="278"></line>
+            </svg>
+          </div>
+          <p>这个 plan 的一个关键 invariant 在 <code>RayActorGraphLauncher._validate_no_ray_gpu_tokens()</code>：所有长驻 actor 的 <code>num_gpus</code> 必须是 0。rollout 侧由 <code>RolloutReplicaControllerActor</code> 按 TP 组持有 <code>resources={"rollout_gpu_i": 1, ...}</code>，trainer 侧由 <code>TrainerRankActor</code> 持有 <code>resources={"train_gpu_i": 1}</code>，运行时再叠加 lease token。disaggregated 示例当前会生成 25 个 actor spec，且没有任何 actor 请求 Ray GPU token。</p>
+        </section>
+
+        <section class="panel" id="iteration">
+          <h2>一轮 RL 训练流程</h2>
+          <p>当前最完整、可执行的走读入口是 <code>ControllerCore.run_smoke_iteration(prompts)</code>。它模拟一轮 PPO/GRPO 类训练中最关键的数据闭环：旧策略生成样本，trainer 消耗样本并导出新权重，rollout 激活新权重后继续采样。</p>
+          <div class="diagram" aria-label="训练循环图">
+            <svg viewBox="0 0 980 390" role="img">
+              <defs>
+                <style>
+                  .t { font: 13px system-ui, sans-serif; fill: #17202a; }
+                  .h { font: 15px system-ui, sans-serif; font-weight: 700; fill: #17202a; }
+                  .m { font: 12px system-ui, sans-serif; fill: #667085; }
+                  .b { fill: #fff; stroke: #d9dee8; rx: 8; }
+                  .r { fill: #eff6ff; stroke: #2563eb; rx: 8; }
+                  .q { fill: #fefce8; stroke: #ca8a04; rx: 8; }
+                  .tr { fill: #ecfdf3; stroke: #16a34a; rx: 8; }
+                  .w { fill: #f5f3ff; stroke: #7c3aed; rx: 8; }
+                  .a { stroke: #667085; stroke-width: 1.7; marker-end: url(#arr2); }
+                </style>
+                <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#667085"></path>
+                </marker>
+              </defs>
+              <text class="h" x="20" y="28">ControllerCore.run_smoke_iteration()</text>
+              <rect class="w" x="30" y="60" width="170" height="58"></rect>
+              <text class="t" x="48" y="84">bootstrap weight</text>
+              <text class="m" x="48" y="104">v0 ACTIVE_GLOBAL</text>
+              <rect class="r" x="240" y="60" width="170" height="58"></rect>
+              <text class="t" x="258" y="84">activate rollout</text>
+              <text class="m" x="258" y="104">all replica ack</text>
+              <rect class="r" x="450" y="60" width="170" height="58"></rect>
+              <text class="t" x="468" y="84">pump rollout</text>
+              <text class="m" x="468" y="104">SampleRecord</text>
+              <rect class="q" x="660" y="60" width="170" height="58"></rect>
+              <text class="t" x="678" y="84">submit queue</text>
+              <text class="m" x="678" y="104">TTL / policy lag</text>
+
+              <rect class="tr" x="660" y="172" width="170" height="58"></rect>
+              <text class="t" x="678" y="196">enter train window</text>
+              <text class="m" x="678" y="216">rollout offload</text>
+              <rect class="q" x="450" y="172" width="170" height="58"></rect>
+              <text class="t" x="468" y="196">reserve batch</text>
+              <text class="m" x="468" y="216">TrainBatch lease</text>
+              <rect class="tr" x="240" y="172" width="170" height="58"></rect>
+              <text class="t" x="258" y="196">optimize ranks</text>
+              <text class="m" x="258" y="216">rank0..rankN</text>
+              <rect class="w" x="30" y="172" width="170" height="58"></rect>
+              <text class="t" x="48" y="196">export/register</text>
+              <text class="m" x="48" y="216">v1 registered</text>
+
+              <rect class="tr" x="30" y="284" width="170" height="58"></rect>
+              <text class="t" x="48" y="308">return rollout</text>
+              <text class="m" x="48" y="328">trainer offload</text>
+              <rect class="w" x="240" y="284" width="170" height="58"></rect>
+              <text class="t" x="258" y="308">activate v1</text>
+              <text class="m" x="258" y="328">rollout resumes</text>
+              <rect class="b" x="450" y="284" width="170" height="58"></rect>
+              <text class="t" x="468" y="308">next iteration</text>
+              <text class="m" x="468" y="328">policy_version=1</text>
+
+              <line class="a" x1="200" y1="89" x2="240" y2="89"></line>
+              <line class="a" x1="410" y1="89" x2="450" y2="89"></line>
+              <line class="a" x1="620" y1="89" x2="660" y2="89"></line>
+              <line class="a" x1="745" y1="118" x2="745" y2="172"></line>
+              <line class="a" x1="660" y1="201" x2="620" y2="201"></line>
+              <line class="a" x1="450" y1="201" x2="410" y2="201"></line>
+              <line class="a" x1="240" y1="201" x2="200" y2="201"></line>
+              <line class="a" x1="115" y1="230" x2="115" y2="284"></line>
+              <line class="a" x1="200" y1="313" x2="240" y2="313"></line>
+              <line class="a" x1="410" y1="313" x2="450" y2="313"></line>
+            </svg>
+          </div>
+          <div class="flow-list">
+            <div class="flow-step"><strong>初始化权重。</strong> <code>bootstrap_initial_weight()</code> 用模型路径生成 <code>WeightMeta(version_id=0)</code>，注册到 <code>WeightRegistryActorCore</code>，再调用 <code>_activate_weight_for_rollout()</code>。</div>
+            <div class="flow-step"><strong>暂停 rollout 做权重激活。</strong> <code>RolloutManagerCore.pause_for_weight()</code> 暂停发新请求；registry 进入 <code>ACTIVATING</code>；每个 rollout replica 调 <code>activate_weight()</code> 并 ack；所有 ack 到齐后变成 <code>ACTIVE_GLOBAL</code>。</div>
+            <div class="flow-step"><strong>投喂 prompt 并持续 rollout。</strong> <code>submit_prompts()</code> 进 backlog；<code>pump_rollout_until_blocked()</code> 根据 output queue 水位、in-flight 容量和 max budget 派发请求。</div>
+            <div class="flow-step"><strong>生成样本。</strong> <code>RolloutReplicaControllerRole.generate()</code> 验证 rollout leases、检查 active policy version、生成 <code>SampleRecord</code>，包含 tokens、old_logprobs、reward、weight checksum 和 lease metadata。</div>
+            <div class="flow-step"><strong>样本入队。</strong> <code>SampleQueueActorCore.submit_sample()</code> 按 TTL、policy lag、high watermark、dedupe 决定 accept/drop。</div>
+            <div class="flow-step"><strong>切入 train window。</strong> <code>enter_train_window()</code> 对每个 shared GPU 调用 <code>GpuResidencyManagerCore.enter_train()</code>：rollout draining/offloaded，trainer hydrate，lease role 从 rollout 切到 trainer。</div>
+            <div class="flow-step"><strong>保留 batch 并训练。</strong> <code>TrainerCoordinatorCore.reserve_batch()</code> 从 queue 拿 <code>TrainBatch</code>；所有 <code>TrainerRankRole.optimize()</code> 在 trainer lease 下执行。</div>
+            <div class="flow-step"><strong>发布新权重。</strong> rank0 调 <code>export_weight()</code> 产生 <code>WeightMeta(version_id=1)</code>，registry 注册；queue 对 batch <code>ack</code>。</div>
+            <div class="flow-step"><strong>回切 rollout。</strong> <code>return_to_rollout()</code> 让 trainer offload、rollout hydrate，lease role 回到 rollout，再激活新权重，开始下一轮。</div>
+          </div>
+          <p>本地 smoke 输出验证了这条链路：一次 prompt 会产生一个 sample、一个 train batch、4 个 trainer rank stats，权重从 v0 变为 v1，shared GPU 在 train window 中处于 <code>TRAINER_ACTIVE</code>，结束后回到 <code>ROLLOUT_ACTIVE</code>。</p>
+        </section>
+
+        <section class="panel" id="rollout">
+          <h2>Rollout 子系统</h2>
+          <p>rollout 的当前设计分三层：全局 rollout manager、每个 DP replica 的 controller、以及 vLLM TP backend。CPU-only smoke path 仍用 <code>RolloutReplicaControllerRole.generate()</code> 生成确定性样本；真实 Ray actor 路径已经在 <code>RolloutReplicaControllerActor</code> 中构造 <code>VllmRolloutBackend</code>，按一个 DP replica 的 TP GPU 组激活权重并调用 vLLM generate。</p>
+          <table>
+            <thead>
+              <tr>
+                <th>组件</th>
+                <th>代码位置</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>RolloutManagerCore</td>
+                <td><a href="../../nano_rl/runtime/coordinators.py"><code>runtime/coordinators.py</code></a></td>
+                <td>维护 prompt backlog、round-robin 选择 replica、in-flight 计数、queue 水位背压、权重激活期间 pause/resume。</td>
+              </tr>
+              <tr>
+                <td>RolloutReplicaControllerRole</td>
+                <td><a href="../../nano_rl/runtime/roles.py"><code>runtime/roles.py</code></a></td>
+                <td>CPU-only deterministic fallback，代表一个 DP replica，持有多个 TP worker id，激活权重并生成样本；每次生成前检查所有 GPU leases。</td>
+              </tr>
+              <tr>
+                <td>RolloutReplicaControllerActor</td>
+                <td><a href="../../nano_rl/runtime/ray/actors.py"><code>runtime/ray/actors.py</code></a></td>
+                <td>Ray 路径的真实 rollout wrapper：接收 replica_id、gpu_ids、worker_ids 和 backend_config，构造 <code>VllmRolloutBackend</code>；<code>activate_weight()</code> 同步 role 状态并调用 backend；<code>generate()</code> 把 vLLM 输出转为 <code>SampleRecord</code>。</td>
+              </tr>
+              <tr>
+                <td>RolloutWorkerRole</td>
+                <td><a href="../../nano_rl/runtime/roles.py"><code>runtime/roles.py</code></a></td>
+                <td>单 TP worker 的逻辑 holder surface，持有一个 GPU id、TP rank、active policy version 和 lease epoch；当前 Ray placement 不再让 worker actor 持有 <code>rollout_gpu_i</code> 资源，资源由 replica controller 按 TP 组持有。</td>
+              </tr>
+              <tr>
+                <td>VllmRolloutBackend</td>
+                <td><a href="../../nano_rl/runtime/backends/vllm_backend.py"><code>runtime/backends/vllm_backend.py</code></a></td>
+                <td>校验 rollout leases、设置 <code>CUDA_VISIBLE_DEVICES</code>、懒加载 vLLM engine，激活权重，调用 <code>engine.generate()</code>，把 vLLM 输出归一化为 <code>GenerationOutput</code> 并可转成 <code>SampleRecord</code>。</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>真实 Ray placement 的关键变化在 <code>build_ray_launch_plan()</code>：每个 <code>RolloutReplicaControllerActor</code> 的 <code>resources</code> 是该 replica 的完整 TP GPU 组，例如 <code>{"rollout_gpu_4": 1, "rollout_gpu_5": 1}</code>；<code>RolloutWorkerActor</code> 仍存在，但 <code>resources={}</code>，用于保留 TP worker 的逻辑 holder/metadata 边界。</p>
+          <p>背压逻辑在 <code>dispatch_from_backlog()</code> 中：如果 output queue depth 达到 <code>queue_high_watermark</code>，直接不派发；否则 request budget 取 queue capacity、rollout capacity、backlog length 和外部 max limit 的最小值。</p>
+          <pre><code>request_budget = min(
+    output_queue_high_watermark - output_queue_depth,
+    max_in_flight - len(_in_flight),
+    len(_input_backlog),
+    max_new_requests,
+)</code></pre>
+          <p>这对应你提出的“rollout 并行度较高，当 output queue 水位不太高时，一直给新的数据进去 rollout”。目前是 pull/tick 风格，后续在真实 ControllerActor 中可以把它变成持续 pump loop。</p>
+        </section>
+
+        <section class="panel" id="queue-registry">
+          <h2>Queue 与权重注册表</h2>
+          <p><a href="../../nano_rl/runtime/sample_queue.py"><code>SampleQueueActorCore</code></a> 是 rollout 与 trainer 之间的样本边界。它不直接复制大样本，而是保存 <code>SampleRef</code>，其中 <code>object_ref</code> 未来可以承载 Ray ObjectRef；当前 smoke path 直接放本地 <code>SampleRecord</code>。</p>
+          <table>
+            <thead>
+              <tr>
+                <th>队列动作</th>
+                <th>约束</th>
+                <th>失败/丢弃语义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>submit_sample</code></td>
+                <td>去重、TTL、policy lag、queue high watermark</td>
+                <td><code>DROPPED_TTL</code>、<code>DROPPED_POLICY_LAG</code>、<code>DROPPED_HIGH_WATERMARK</code></td>
+              </tr>
+              <tr>
+                <td><code>reserve_train_batch</code></td>
+                <td>按 <code>max_sequences</code> / <code>max_tokens</code> 选样本，并再次过滤过期和 policy lag</td>
+                <td>没有可用样本时返回 <code>None</code></td>
+              </tr>
+              <tr>
+                <td><code>ack_batch</code></td>
+                <td>trainer 成功后确认 batch</td>
+                <td>未知 batch 抛 <code>QueueError</code></td>
+              </tr>
+              <tr>
+                <td><code>release_batch</code></td>
+                <td>trainer 失败时把未 ack 样本放回 pending</td>
+                <td>未知 batch 抛 <code>QueueError</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <p><a href="../../nano_rl/runtime/weight_registry.py"><code>WeightRegistryActorCore</code></a> 管权重版本状态。它的关键点不是单纯保存最新权重，而是让权重激活经过所有 rollout replica ack：<code>REGISTERED -> ACTIVATING -> ACTIVE_GLOBAL</code>。这保证 rollout worker 不会在部分节点还没切权重时就把新 policy 当作全局可用版本。</p>
+          <div class="callout">
+            <strong>policy version 是硬边界：</strong><code>SampleRecord</code>、<code>SampleRef</code>、<code>TrainBatch</code> 都携带 policy version 信息；partial rollout 时还可以用 <code>PolicySegment</code> 记录不同 token 段的行为策略版本。
+          </div>
+        </section>
+
+        <section class="panel" id="trainer">
+          <h2>Trainer 与 train window</h2>
+          <p>Trainer 侧有两类对象：<code>TrainerCoordinatorCore</code> 管全局 world size、rank assignment 和 batch reservation；Ray 路径的 <code>TrainerRankActor</code> 通过 <code>build_trainer_backend()</code> 构造 <code>Fsdp2TrainerBackend</code> 或 <code>FakeTrainerBackend</code>。CPU-only smoke path 仍可以直接用 <code>TrainerRankRole</code> 做 deterministic optimize。</p>
+          <p><code>Fsdp2TrainerBackend</code> 现在不再固定抛“未实现”：它会懒导入 torch/transformers/FSDP2，设置当前 rank 的 <code>CUDA_VISIBLE_DEVICES</code>，加载 HF causal LM 与 tokenizer，初始化 AdamW，对 <code>TrainBatch.sample_refs[*].object_ref</code> 中的 <code>SampleRecord</code> 拼接 prompt/response 后做 LM loss step，并由 rank0 把版本化 checkpoint 写到 <code>trainer.checkpoint_dir/version-N</code>。</p>
+          <p>共享 GPU 的 train window 是最核心的状态机。<a href="../../nano_rl/runtime/offload.py"><code>GpuResidencyManagerCore.enter_train()</code></a> 和 <code>exit_train()</code> 会把 lease 与 offload/hydrate hook 串在一起：</p>
+          <pre><code>ROLLOUT_ACTIVE
+  -> ROLLOUT_DRAINING
+  -> ROLLOUT_OFFLOADED
+  -> TRAINER_HYDRATING
+  -> TRAINER_ACTIVE
+
+TRAINER_ACTIVE
+  -> TRAINER_OFFLOADED
+  -> ROLLOUT_WAKING
+  -> ROLLOUT_ACTIVE</code></pre>
+          <p>这套状态机的价值是：rollout actor 和 trainer actor 可以是不同 failure domain，但同一张 shared GPU 任意时刻只有一个 active role。每次切换都会产生新的 <code>lease_epoch</code>，旧 lease 不能继续通过 <code>assert_active()</code>。</p>
+          <table>
+            <thead>
+              <tr>
+                <th>失败类型</th>
+                <th>触发位置</th>
+                <th>当前行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>SHARED_GPU_OFFLOAD_FAILED</code></td>
+                <td>offload hook 失败或残留显存超预算</td>
+                <td>返回结构化失败，状态进入 <code>DEGRADED</code>，Controller 记录 metrics 并抛错。</td>
+              </tr>
+              <tr>
+                <td><code>SHARED_GPU_HYDRATE_FAILED</code></td>
+                <td>hydrate hook 失败或残留显存超预算</td>
+                <td>返回结构化失败，状态进入 <code>DEGRADED</code>。</td>
+              </tr>
+              <tr>
+                <td><code>SHARED_GPU_TOGGLE_TIMEOUT</code></td>
+                <td>offload/hydrate duration 超过配置预算</td>
+                <td>返回 timeout 事件，避免 silent hang。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" id="backends">
+          <h2>vLLM / FSDP2 后端边界</h2>
+          <p>后端代码当前是“Ray actor 已接入、可导入、可测试、懒加载真实依赖”的 adapter 实现，避免在普通配置解析或单测中强制安装 vLLM/PyTorch GPU 环境。真正调用真实后端发生在 Ray actor 方法里：rollout 进入 <code>RolloutReplicaControllerActor.activate_weight/generate</code>，trainer 进入 <code>TrainerRankActor.initialize_rank/hydrate/optimize/export_weight/offload</code>。</p>
+          <div class="evidence-grid">
+            <article class="evidence-card">
+              <p class="card-label">vLLM rollout backend</p>
+              <p class="card-value"><code>RolloutReplicaControllerActor</code> 构造 <code>VllmRolloutBackend</code>；backend 校验 GPU/holder lease、拒绝重复 GPU lease、按 <code>gpu_ids</code> 设置 <code>CUDA_VISIBLE_DEVICES</code>，再懒构造 vLLM engine；<code>generate()</code> 检查 active weight version，并把 vLLM request output 归一化为 <code>GenerationOutput</code>。</p>
+            </article>
+            <article class="evidence-card">
+              <p class="card-label">Fake trainer backend</p>
+              <p class="card-value"><code>FakeTrainerBackend</code> 可完整 initialize/hydrate/optimize/export/offload，用于 CPU-only 单测和 smoke。</p>
+            </article>
+            <article class="evidence-card">
+              <p class="card-label">FSDP2 trainer backend</p>
+              <p class="card-value"><code>TrainerRankActor</code> 构造 <code>Fsdp2TrainerBackend</code>；backend 会加载 HF model/tokenizer、初始化 optimizer、执行 LM loss optimize、offload 到 CPU，并由 rank0 <code>save_pretrained()</code> 后返回新的 <code>WeightMeta</code>。真实多 rank FSDP2 依赖 checkpoint 目录和 rendezvous/store endpoint。</p>
+            </article>
+            <article class="evidence-card">
+              <p class="card-label">actor 启动开关</p>
+              <p class="card-value"><code>RayDriver.train()</code> 默认返回 <code>execution_status=planned_backend_integrated</code>；只有 <code>run.start_ray_actors=true</code> 时才调用 <code>start_actor_graph()</code>，并可在测试里注入 fake actor builders。</p>
+            </article>
+          </div>
+          <p>因此，当前代码里的“训练”有两种语义要区分：</p>
+          <ul>
+            <li><strong>协议和状态机训练：</strong><code>run_smoke_iteration()</code> 已经完整执行，证明组件能组合。</li>
+            <li><strong>真实模型训练：</strong><code>run.start_ray_actors: true</code> 会启动 Ray actor graph；vLLM engine 与 FSDP2 optimizer/export 路径已挂到 actor adapter，但要真正跑通仍需要本机依赖、模型 artifact、<code>trainer.checkpoint_dir</code>、多 rank rendezvous 和 GPU 集成测试。</li>
+          </ul>
+          <pre><code>RayDriver.train()
+  -> build_ray_launch_plan()
+  -> RayActorGraphLauncher.start()
+  -> RolloutReplicaControllerActor(..., backend_config={gpu_ids, holder_ids, tensor_parallel_size})
+  -> TrainerRankActor(..., backend_config={backend=fsdp2, model_path, checkpoint_dir, rank/world_size})</code></pre>
+        </section>
+
+        <section class="panel" id="tests">
+          <h2>测试覆盖与成熟度</h2>
+          <p>当前测试套件已经覆盖配置归一化、GPU lease、offload 状态机、queue/registry、coordinator、Ray placement/launcher、vLLM 后端 adapter、FSDP2 后端 adapter 和 smoke script。最新验证结果：</p>
+          <pre><code>$ python3 -m pytest -q
+........................................................................
+72 passed in 2.14s</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>测试文件</th>
+                <th>验证重点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><a href="../../tests/test_config.py"><code>tests/test_config.py</code></a></td>
+                <td>YAML 模式、拓扑数量、parallel/placement 对齐、role class import、内部 mode 不暴露给用户。</td>
+              </tr>
+              <tr>
+                <td><a href="../../tests/test_slot.py"><code>tests/test_slot.py</code></a> / <a href="../../tests/test_offload.py"><code>test_offload.py</code></a></td>
+                <td>共享 GPU lease 切换、rollout-only 拒绝 trainer、epoch 过期、offload/hydrate 失败和 timeout。</td>
+              </tr>
+              <tr>
+                <td><a href="../../tests/test_coordinators.py"><code>tests/test_coordinators.py</code></a></td>
+                <td>rollout round-robin、pause/resume、queue 背压、trainer batch reservation。</td>
+              </tr>
+              <tr>
+                <td><a href="../../tests/test_ray_placement.py"><code>tests/test_ray_placement.py</code></a> / <a href="../../tests/test_ray_launcher.py"><code>test_ray_launcher.py</code></a></td>
+                <td>Ray actor spec、custom resources、rollout replica controller 按 TP 组持有 <code>rollout_gpu_i</code>、trainer rank 持有 <code>train_gpu_i</code>、所有 actor <code>num_gpus=0</code>、fake remote actor graph。</td>
+              </tr>
+              <tr>
+                <td><a href="../../tests/test_vllm_backend.py"><code>tests/test_vllm_backend.py</code></a> / <a href="../../tests/test_fsdp2_backend.py"><code>test_fsdp2_backend.py</code></a></td>
+                <td>vLLM 多 GPU holder 校验、<code>CUDA_VISIBLE_DEVICES</code>、<code>GenerationOutput -> SampleRecord</code>；FSDP2 fake torch/transformers step、checkpoint export、Ray ObjectRef materialization、缺依赖时结构化错误。</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout">
+            <strong>当前成熟度判断：</strong>控制面、协议面、Ray actor graph 和 backend adapter 已有单元测试；真实 GPU 执行面仍需要集成测试，尤其是 vLLM sleep/offload、FSDP2 多 rank rendezvous、真实 checkpoint/export、Ray actor 故障恢复。
+          </div>
+        </section>
+
+        <section class="panel" id="reading">
+          <h2>建议阅读顺序</h2>
+          <ol>
+            <li>先读 <a href="../../docs/examples/disaggregated.yaml"><code>docs/examples/disaggregated.yaml</code></a>，建立一台 8 GPU 机器上的 rollout-only/shared 拓扑直觉。</li>
+            <li>读 <a href="../../nano_rl/config.py"><code>nano_rl/config.py</code></a> 的 <code>RuntimeConfig._validate_cross_fields()</code> 和 <code>_build_gpu_plan()</code>，看数量如何展开成具体 GPU plan。</li>
+            <li>读 <a href="../../nano_rl/runtime/slot.py"><code>slot.py</code></a> 和 <a href="../../nano_rl/runtime/offload.py"><code>offload.py</code></a>，理解共享 GPU 不是靠 Ray GPU token，而是靠 custom resource + lease + residency state。</li>
+            <li>读 <a href="../../nano_rl/runtime/ray/placement.py"><code>ray/placement.py</code></a> 和 <a href="../../nano_rl/runtime/ray/actors.py"><code>ray/actors.py</code></a>，看 backend config 如何进入 rollout replica actor 和 trainer rank actor。</li>
+            <li>读 <a href="../../nano_rl/runtime/backends/vllm_backend.py"><code>vllm_backend.py</code></a> 和 <a href="../../nano_rl/runtime/backends/fsdp2_backend.py"><code>fsdp2_backend.py</code></a>，确认 vLLM/FSDP2 adapter 的真实调用边界、lazy import 和 fail-fast 条件。</li>
+            <li>读 <a href="../../nano_rl/runtime/controller.py"><code>controller.py</code></a> 的 <code>run_smoke_iteration()</code>，这是当前 CPU-only 最完整的一轮 RL 训练主线。</li>
+            <li>顺着主线读 <a href="../../nano_rl/runtime/coordinators.py"><code>coordinators.py</code></a>、<a href="../../nano_rl/runtime/sample_queue.py"><code>sample_queue.py</code></a>、<a href="../../nano_rl/runtime/weight_registry.py"><code>weight_registry.py</code></a>、<a href="../../nano_rl/runtime/roles.py"><code>roles.py</code></a>。</li>
+            <li>最后读 <a href="../../nano_rl/runtime/ray/driver.py"><code>ray/driver.py</code></a> 和 <a href="../../nano_rl/runtime/ray/launcher.py"><code>ray/launcher.py</code></a>，看 <code>run.start_ray_actors</code> 如何控制 plan-only 与真实 actor graph 启动。</li>
+          </ol>
+          <p class="small">这份报告基于当前工作区状态生成。工作区存在既有未提交修改和未跟踪实现文件，因此它描述的是当前文件内容，而不是某个干净 release tag。</p>
+        </section>
+      </div>
+    </div>
+
+    <p class="footer">Generated for nano-rl code walkthrough. Source files are linked relative to this HTML file.</p>
+  </main>
+</body>
+</html>

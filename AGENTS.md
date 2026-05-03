@@ -14,11 +14,13 @@ subdirectory.
 
 ## Current Project State
 
-`nano-rl` is currently in a design-first / early-implementation stage. An
-initial Python runtime skeleton exists, but do not assume a complete trainer,
-rollout, or Ray execution implementation exists yet. Treat the existing
-documents, schemas, and core runtime tests as the source of truth before adding
-code.
+`nano-rl` is currently in a design-first / early backend-integrated stage. A
+Python runtime skeleton exists, and the Ray actor wrappers are connected to
+lazy vLLM/FSDP2 backend adapters, but do not assume a complete production
+trainer/rollout loop exists yet. Real FSDP2 execution still depends on model
+artifacts, `trainer.checkpoint_dir`, and process-group rendezvous metadata.
+Treat the existing documents, schemas, and core runtime tests as the source of
+truth before adding code.
 
 Canonical documents:
 
@@ -31,9 +33,9 @@ Canonical documents:
 - `docs/protocols/*.yaml`: draft protocol/config schemas.
 - `docs/examples/collocated.yaml`: collocated runtime config.
 - `docs/examples/disaggregated.yaml`: disaggregated runtime config.
-- `nano_rl/`: initial runtime skeleton with config models, resolved GPU plan,
-  lease manager, queue, registry, coordinators, metrics, and Ray wrapper
-  boundaries.
+- `nano_rl/`: runtime skeleton with config models, resolved GPU plan, lease
+  manager, queue, registry, coordinators, metrics, backend adapters,
+  residency/offload state machine, and Ray wrapper/launcher boundaries.
 - `tests/`: narrow validation tests for config normalization and runtime cores.
 
 ## Architecture Invariants
@@ -69,6 +71,8 @@ Canonical documents:
   rollout/trainer actors should not both request Ray `num_gpus=1`; use
   role-scoped custom resources such as `rollout_gpu_4` / `train_gpu_4` plus
   lease-token checks before CUDA work.
+- Rollout replica actors claim the `rollout_gpu_i` custom resources for their
+  whole TP group; long-lived actors still use Ray `num_gpus=0`.
 - GPU topology modes are quantity based: `rollout_only_gpus`,
   `shared_gpus`, and optional `idle_gpus`. Rollout actors are unique within the
   rollout assignment set, trainer ranks are unique within the trainer assignment
@@ -83,6 +87,12 @@ Canonical documents:
 - `RolloutManagerActor` owns prompt backlog, in-flight accounting, queue
   backpressure response, and rollout pump scheduling. Dataloaders should feed
   prompts into the manager instead of calling rollout workers directly.
+- Real backend execution boundaries live under `nano_rl.runtime.backends`,
+  `nano_rl.runtime.offload`, and `nano_rl.runtime.ray.launcher`. Keep imports
+  for vLLM, torch, FSDP2, and Ray startup lazy so CPU-only tests still run.
+- `run.start_ray_actors` controls whether `RayDriver.train()` actually starts
+  the Ray actor graph. With the default `false`, train emits a backend-integrated
+  plan only.
 - Weight and sample protocols must carry policy/version metadata. Do not add
   data paths that bypass `policy_version` / weight version accounting.
 - In `standalone_hybrid`, enforce bounded staleness with policy lag, sample TTL,
