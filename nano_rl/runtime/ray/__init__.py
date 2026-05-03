@@ -1,5 +1,11 @@
 """Ray runtime wrappers."""
 
+from nano_rl.runtime.ray.cluster import RayClusterController, RayClusterStartupResult
 from nano_rl.runtime.ray.launcher import RayActorGraph, RayActorGraphLauncher
 
-__all__ = ["RayActorGraph", "RayActorGraphLauncher"]
+__all__ = [
+    "RayActorGraph",
+    "RayActorGraphLauncher",
+    "RayClusterController",
+    "RayClusterStartupResult",
+]

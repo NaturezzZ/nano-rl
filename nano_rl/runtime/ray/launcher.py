@@ -16,6 +16,7 @@ from nano_rl.runtime.ray.actors import (
     build_trainer_rank_actor_class,
     build_weight_registry_actor_class,
 )
+from nano_rl.runtime.ray.cluster import RayClusterController, RayClusterStartupResult
 from nano_rl.runtime.ray.placement import RayActorSpec, RayLaunchPlan
 
 
@@ -30,6 +31,7 @@ class RayActorGraph:
     launch_plan: RayLaunchPlan
     resource_summary: dict[str, Any]
     dry_run: bool = False
+    ray_cluster: RayClusterStartupResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class RayActorGraph:
             "launch_plan": self.launch_plan.model_dump(mode="json"),
             "resource_summary": self.resource_summary,
             "dry_run": self.dry_run,
+            "ray_cluster": self.ray_cluster.to_dict() if self.ray_cluster else None,
         }
 
 
@@ -55,7 +58,9 @@ class RayActorGraphLauncher:
     actor_class_builders: Mapping[str, RemoteActorClassBuilder] | None = None
     start_ray: bool = False
     ray_address: str | None = None
+    ray_module: Any | None = None
     _handles: dict[str, Any] = field(default_factory=dict, init=False)
+    _ray_cluster: RayClusterStartupResult | None = field(default=None, init=False)
 
     def start(self, *, dry_run: bool = False) -> RayActorGraph:
         self._validate_no_ray_gpu_tokens()
@@ -67,8 +72,9 @@ class RayActorGraphLauncher:
                 dry_run=True,
             )
 
+        self._ray_cluster = None
         if self.start_ray:
-            self._ensure_ray_initialized()
+            self._ray_cluster = self._ensure_ray_initialized()
 
         handles: dict[str, Any] = {}
         builders = self._actor_class_builders()
@@ -88,6 +94,7 @@ class RayActorGraphLauncher:
             launch_plan=self.launch_plan,
             resource_summary=self.resource_summary(),
             dry_run=False,
+            ray_cluster=self._ray_cluster,
         )
 
     def resource_summary(self) -> dict[str, Any]:
@@ -149,20 +156,13 @@ class RayActorGraphLauncher:
             names = ", ".join(spec.name for spec in offenders)
             raise ValueError(f"long-lived Ray actors must not request num_gpus>0: {names}")
 
-    def _ensure_ray_initialized(self) -> None:
-        try:
-            import ray
-        except ImportError as exc:
-            raise RuntimeError("Ray is required to start the actor graph") from exc
-
-        if ray.is_initialized():
-            return
-        init_kwargs: dict[str, Any] = {"namespace": self.namespace}
-        if not self.ray_address or self.ray_address == "local":
-            init_kwargs["resources"] = dict(self.launch_plan.node_custom_resources)
-        if self.ray_address:
-            init_kwargs["address"] = self.ray_address
-        ray.init(**{key: value for key, value in init_kwargs.items() if value is not None})
+    def _ensure_ray_initialized(self) -> RayClusterStartupResult:
+        return RayClusterController(
+            namespace=self.namespace,
+            ray_address=self.ray_address,
+            node_custom_resources=self.launch_plan.node_custom_resources,
+            ray_module=self.ray_module,
+        ).ensure_initialized()
 
 
 def default_actor_class_builders() -> Mapping[str, RemoteActorClassBuilder]:

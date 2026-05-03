@@ -23,6 +23,17 @@ class WeightFormat(StrEnum):
     VLLM_COMPATIBLE = "vllm_compatible"
 
 
+class WeightTransferMethod(StrEnum):
+    OBJECT_REF = "objectref"
+    LOCALITY_AWARE_CHECKPOINT = "locality_aware_checkpoint"
+
+
+class WeightShardSourceKind(StrEnum):
+    RAY_OBJECT_REF = "ray_object_ref"
+    SHARED_GPU_RESHARD = "shared_gpu_reshard"
+    ARTIFACT_PULL = "artifact_pull"
+
+
 class WeightMeta(BaseModel):
     version_id: int = Field(ge=0)
     created_at: datetime
@@ -38,6 +49,31 @@ class WeightMeta(BaseModel):
     chat_template_hash: str | None = None
     created_by: str | None = None
     status: WeightStatus = WeightStatus.REGISTERED
+
+
+class WeightShardSource(BaseModel):
+    replica_id: str
+    kind: WeightShardSourceKind
+    target_gpu_ids: tuple[int, ...] = ()
+    target_worker_ids: tuple[str, ...] = ()
+    source_rank_ids: tuple[int, ...] = ()
+    source_gpu_ids: tuple[int, ...] = ()
+    artifact_uri: str | None = None
+    manifest_uri: str | None = None
+    object_ref_key: str | None = None
+    reason: str
+
+
+class WeightTransferPlan(BaseModel):
+    version_id: int = Field(ge=0)
+    method: WeightTransferMethod
+    artifact_uri: str | None = None
+    manifest_uri: str | None = None
+    sources: dict[str, WeightShardSource]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def source_for_replica(self, replica_id: str) -> WeightShardSource:
+        return self.sources[replica_id]
 
 
 class SampleRecord(BaseModel):

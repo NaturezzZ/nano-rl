@@ -60,7 +60,7 @@
 ### 2.1 核心组件
 
 1. **`main.py`**：用户启动入口，加载 YAML config，处理少量执行控制参数，生成 `LaunchConfig`；
-2. **Ray Driver**：初始化 Ray runtime、校验资源、创建 `ControllerActor`；
+2. **Ray Driver / RayClusterController**：初始化 Ray runtime、校验资源、创建 `ControllerActor`；
 3. **ControllerActor**：唯一 loop 语义源，统一驱动 train-step/rollout-step；
 4. **Mode FSM**：模式状态机（fully sync、standalone hybrid、degraded）；
 5. **GpuLeaseManagerActor**：CPU actor，负责物理 GPU 的 active role、lease epoch、失败状态和 CUDA gate；
@@ -68,8 +68,9 @@
 7. **RolloutManager / RolloutReplicaController / RolloutWorkerActor**：全局 rollout 生命周期、每个 DP replica 的 TP group 控制，以及实际 vLLM GPU worker；
 8. **RewardActorPool**：reward 计算与可插拔 reward function；
 9. **WeightRegistryActor**：权重版本注册、激活、健康状态；
-10. **SampleQueueActor**：样本传输与背压（trajectory、token-level stats）；
-11. **MetricsActor**：统一指标、事件和 tracing。
+10. **WeightTransferPlanner / WeightTransfer module**：独立决定 trainer 更新后的权重如何进入每个 rollout replica，支持 `objectref` 和 locality-aware artifact/reshard 策略；
+11. **SampleQueueActor**：样本传输与背压（trajectory、token-level stats）；
+12. **MetricsActor**：统一指标、事件和 tracing。
 
 ### 2.2 Ray-native 执行层
 
@@ -77,12 +78,13 @@ Ray 不是外部 adapter，而是 nano-rl v0.1 的执行模型：
 
 1. `RayDriver.train()` 总是先校验配置并生成 `RayLaunchPlan`；
 2. 当 `run.start_ray_actors: false` 时，train 路径返回 `planned_backend_integrated` 计划，不启动 Ray actor graph，适合 config/dry-run/CI 验证；
-3. 当 `run.start_ray_actors: true` 时，`RayActorGraphLauncher` 调用 `ray.init(...)` 并按 `RayLaunchPlan` 创建真实 Ray actor graph；
-4. `gpu_plan` 由数量自动展开：用户只写 `rollout_only_gpus`、`shared_gpus`、rollout DP/TP 和 trainer rank 数，不手写物理 GPU id；
-5. `TrainerGroup` 是多个 `TrainerRankActor` 的逻辑集合，rank 映射到 `shared_gpus`，真实 FSDP2 多 rank 运行需要模型/checkpoint artifact 与稳定 rendezvous/store endpoint；
-6. `RolloutManagerActor` 管理多个 `RolloutReplicaControllerActor`；每个 DP replica controller 管理一个 vLLM TP group 和若干 `RolloutWorkerActor`；
-7. `RewardActorPool` 与 `SampleQueueActor` 通过 Ray ObjectRef 传输样本批次；
-8. 大权重不通过 Ray object store 广播，`TrainerRank(rank=0)` 发布 `WeightMeta(model_path=...)`，rollout role 按 path 拉取或激活。
+3. 当 `run.start_ray_actors: true` 时，`RayActorGraphLauncher` 先通过 `RayClusterController` 初始化 Ray：`runtime.ray.address=auto` 先尝试连接已有 cluster，连接失败则创建本机 single-machine Ray cluster；显式非 `auto` address 保持连接失败即 fail-fast；
+4. Ray 初始化完成后，`RayActorGraphLauncher` 按 `RayLaunchPlan` 创建真实 Ray actor graph；
+5. `gpu_plan` 由数量自动展开：用户只写 `rollout_only_gpus`、`shared_gpus`、rollout DP/TP 和 trainer rank 数，不手写物理 GPU id；
+6. `TrainerGroup` 是多个 `TrainerRankActor` 的逻辑集合，rank 映射到 `shared_gpus`，真实 FSDP2 多 rank 运行需要模型/checkpoint artifact 与稳定 rendezvous/store endpoint；
+7. `RolloutManagerActor` 管理多个 `RolloutReplicaControllerActor`；每个 DP replica controller 管理一个 vLLM TP group 和若干 `RolloutWorkerActor`；
+8. `RewardActorPool` 与 `SampleQueueActor` 通过 Ray ObjectRef 传输样本批次；
+9. 大权重默认不通过 Ray object store 广播，`TrainerRank(rank=0)` 发布 `WeightMeta(model_path=...)`，`WeightTransferPlanner` 按 `weight_transfer.method` 为每个 rollout replica 选择 objectref、shared GPU 本地 reshard 或 artifact pull。
 
 这样做的目标是让启动、路由、故障感知都留在 Ray 内部完成，同时避免把模型权重这种大对象错误地塞进 Ray object store。
 
@@ -167,7 +169,8 @@ TrainerRankActor(num_gpus=0, resources={"train_gpu_4": 1})
 
 当前实现已经把 Ray actor graph 接到 vLLM/FSDP2 backend adapter，真实依赖仍保持 lazy import：
 
-- `nano_rl.runtime.ray.launcher.RayActorGraphLauncher`：根据 `RayLaunchPlan` 创建真实 Ray actor graph；`run.start_ray_actors=false` 只返回 plan，`run.start_ray_actors=true` 才启动 actors；
+- `nano_rl.runtime.ray.cluster.RayClusterController`：封装 Ray cluster connect-or-create 逻辑；`address=auto` 先连已有 cluster，失败后创建带 `node_custom_resources` 的本机 cluster；显式 address 连接失败时不 fallback；
+- `nano_rl.runtime.ray.launcher.RayActorGraphLauncher`：根据 `RayLaunchPlan` 创建真实 Ray actor graph；`run.start_ray_actors=false` 只返回 plan，`run.start_ray_actors=true` 才初始化 Ray 并启动 actors；
 - `nano_rl.runtime.ray.actors.RolloutReplicaControllerActor`：构造 `VllmRolloutBackend`，在 `activate_weight()` / `generate()` 中把 Ray actor 调用转成 vLLM backend adapter 调用；
 - `nano_rl.runtime.ray.actors.TrainerRankActor`：构造 `Fsdp2TrainerBackend`，在 `initialize_rank()` / `hydrate()` / `optimize()` / `export_weight()` / `offload()` 中转接 FSDP2 trainer backend adapter；
 - `nano_rl.runtime.backends.vllm_backend.VllmRolloutBackend`：lazy-import vLLM，统一 `activate_weight` / `generate` 输出，并在 CUDA-facing 方法入口校验 rollout lease；
@@ -185,6 +188,7 @@ TrainerRankActor(num_gpus=0, resources={"train_gpu_4": 1})
 | `TrainerRankActor` | logical train GPU resource | FSDP2 rank、train step、梯度同步、checkpoint shard |
 | `SampleQueueActor` | CPU | 样本队列、TTL、policy lag guard、ObjectRef 背压 |
 | `WeightRegistryActor` | CPU | 权重版本、激活状态、rollback 标记 |
+| `WeightTransferPlanner` | CPU module | per-version/per-replica 权重传输计划；`objectref` 用 Ray object store，`locality_aware_checkpoint` 对 shared GPU reshard、对 rollout-only GPU artifact hydrate |
 | `MetricsActor` | CPU | 指标、事件、health trace |
 
 ### 2.4 GPU topology 与 role 状态
@@ -325,7 +329,7 @@ YAML 参数分为四层：
 - **训练语义参数**：model、dataset、algorithm、learning rate、batch size、max steps、seed、checkpoint；
 - **模式与控制参数**：用户入口 `collocated/disaggregated`，内部 canonical mode `fully_sync/standalone_hybrid`，以及 `max_policy_lag`、sample TTL、queue 水位、ObjectRef 背压阈值。
 
-单机资源参数在 v0.1 中用于 Ray local runtime 资源校验与 placement group 规划，不负责 SSH/Slurm/K8s 或多机 Ray cluster 拉起。多机扩展留到后续版本。
+单机资源参数在 v0.1 中用于 Ray local runtime 资源校验与 placement group 规划。`runtime.ray.address=auto` 允许启动时先连接已有 cluster，连接失败后由启动控制器创建本机 single-machine Ray cluster；v0.1 仍不负责 SSH/Slurm/K8s 或多机 Ray cluster 拉起。多机扩展留到后续版本。
 
 ### 2.7 启动期输入 artifact 校验
 
@@ -543,7 +547,9 @@ weights/
 
 `version_id` 由 `WeightRegistryActor` 单调分配或由 trainer step 单调映射，但必须全局唯一。`parent_version` 指向上一个成功训练基线。注册成功不代表所有 rollout workers 已经激活，只代表该版本可供激活。
 
-v0.1 不把大权重放进 Ray object store。Ray 只传 `WeightMeta`，其中 URI/path 指向 backend loader 可读取的模型或 checkpoint artifact。
+权重发布和权重传输分开处理。trainer/exporter 只负责产出 `WeightMeta`、artifact/manifest 和 checksum；`WeightTransferPlanner` 在 rollout 激活前根据 `weight_transfer.method` 生成 `WeightTransferPlan`。这样未来多机时可以替换 transfer backend，而不改 FSDP2 trainer、vLLM rollout 或 registry 状态机。
+
+v0.1 默认不把大权重放进 Ray object store。Ray 只传 `WeightMeta`、`WeightTransferPlan` 和少量 metadata，其中 URI/path 指向 backend loader 可读取的模型或 checkpoint artifact。
 
 ### 4.7 Trainer 失败语义
 
@@ -745,10 +751,39 @@ trainer 到 rollout 的路径：
 4. exporter 原子提交为 `policy-v000123/`；
 5. exporter 调用 `WeightRegistryActor.register(meta)`；
 6. registry 把版本标记为 `REGISTERED`；
-7. `RolloutManagerActor` 暂停所有 rollout replicas；
-8. replica controllers 协调 TP workers 释放旧 KV cache 并拉取/加载同一个目标版本；
-9. replicas ack active target version；
-10. registry 在所有要求的 workers ack 后更新 latest served version。
+7. `WeightTransferPlanner` 根据 `weight_transfer.method` 和 `ResolvedGpuPlan` 生成 `WeightTransferPlan`；
+8. `RolloutManagerActor` 暂停所有 rollout replicas；
+9. replica controllers 协调 TP workers 释放旧 KV cache，并按各自 `WeightShardSource` materialize 同一个目标版本；
+10. replicas ack active target version；
+11. registry 在所有要求的 workers ack 后更新 latest served version。
+
+`weight_transfer.method` 目前有两种：
+
+- `objectref`：trainer/exporter 把 rollout 可消费的权重对象或 shard refs 放进 Ray object store，`WeightTransferPlan.sources[*].kind=ray_object_ref`。这个路径实现简单，适合小模型测试、fake backend 或调试，但对真实大模型过重：object store 会复制/序列化大张量，跨 replica fan-out 容易挤压 sample refs。
+- `locality_aware_checkpoint`：默认生产向路径。shared GPU 上的 rollout replica 在训练窗口之后会回到同一批物理 GPU，这些 GPU 已经持有 FSDP2 更新后的 rank-local 权重或 CPU standby state；对应 `WeightShardSource.kind=shared_gpu_reshard`，activation 只需要在 lease 切回 rollout 后把本地 trainer shard reshard 成 vLLM TP layout。rollout-only GPU 没有 trainer-resident 权重，对应 `WeightShardSource.kind=artifact_pull`，从 `artifact_uri` / `manifest_uri` 拉取需要的 vLLM shard。
+
+这解决了 hybrid 场景里的非对称性：shared GPU 不做全量远程传输，只做本地格式转换/reshard；rollout-only GPU 通过版本 artifact hydrate。一个 rollout TP group 不允许横跨 rollout-only/shared 生命周期区域，因此 planner 不需要处理半个 TP group 本地、半个 TP group 远程的模糊状态。
+
+`WeightTransferPlan` 是 per-version/per-replica 的控制面对象，不承载大 tensor：
+
+```yaml
+version_id: int
+method: [objectref, locality_aware_checkpoint]
+artifact_uri: str
+manifest_uri: str
+sources:
+  rollout-dp-2:
+    kind: shared_gpu_reshard
+    target_gpu_ids: [4, 5]
+    source_rank_ids: [0, 1]
+    source_gpu_ids: [4, 5]
+  rollout-dp-0:
+    kind: artifact_pull
+    target_gpu_ids: [0, 1]
+    artifact_uri: /tmp/nano-rl-checkpoints/version-123
+```
+
+未来多机时，这个模块可以继续扩展 `kind`，例如 distributed checkpoint、NCCL/UCX peer transfer、RDMA object store 或 parameter-server style weight service；Controller 和 registry 仍只看版本、计划、ack 和失败事件。
 
 Weight state 建议：
 
@@ -786,7 +821,17 @@ created_by: str
 status: [registered, activating, active_global, failed, deprecated]
 ```
 
-### 6.4 SampleRecord
+### 6.4 WeightTransferPlan
+
+`WeightTransferPlan` 是独立模块的输出，不写入 `WeightMeta` 本体，避免 registry 变成传输后端的耦合点。它的职责是把一个全局权重版本拆成每个 rollout replica 的 materialization source：
+
+- `ray_object_ref`：对应 `objectref` method；
+- `shared_gpu_reshard`：目标 rollout TP group 的 GPU 全部是 shared GPU，并且这些 GPU 有对应 FSDP2 trainer rank；
+- `artifact_pull`：目标 rollout TP group 不拥有 trainer shard，必须从 artifact/manifest hydrate。
+
+每个 source 至少包含 `replica_id`、`target_gpu_ids`、`target_worker_ids`、`kind` 和 `reason`。`shared_gpu_reshard` 还包含 `source_rank_ids/source_gpu_ids`，`artifact_pull` 包含 `artifact_uri/manifest_uri`，`ray_object_ref` 包含 object ref key 或实际 Ray ref 的外部索引。实际大 tensor 不进入该 plan。
+
+### 6.5 SampleRecord
 
 ```yaml
 sample_id: str
@@ -825,7 +870,7 @@ reward_source: str
 drop_reason: optional[str]
 ```
 
-### 6.5 TrainBatch
+### 6.6 TrainBatch
 
 `TrainBatch` 是 trainer 消费侧的聚合协议，不需要作为外部持久 schema，但实现时应有结构化模型：
 
@@ -845,7 +890,7 @@ expires_at: ts
 
 `reserved_by` 通常是 `TrainerCoordinatorActor` 的 logical id。`reserved_at` 到 train ack 之间如果 coordinator 失联，queue 可以按 lease timeout 释放 reservation。
 
-### 6.6 健康事件协议
+### 6.7 健康事件协议
 
 最小事件集：
 
@@ -879,22 +924,22 @@ created_at: ts
 details: map[str, any]
 ```
 
-### 6.7 Ray 传输约定
+### 6.8 Ray 传输约定
 
 - 控制消息：Pydantic model 直接作为 Ray actor method 参数；
 - 样本批次：大 batch 放入 Ray object store，以 `ObjectRef` 在 actor 间传递；
-- 权重版本：只传 `WeightMeta`，其中 `model_path` / `tokenizer_path` / artifact URI 指向 backend loader 可读取的普通 artifact path；不把大权重作为 Ray object payload 传播；
+- 权重版本：默认只传 `WeightMeta` 与 `WeightTransferPlan`，其中 `model_path` / `tokenizer_path` / artifact URI 指向 backend loader 可读取的普通 artifact path；只有显式设置 `weight_transfer.method=objectref` 时才允许把权重对象或 shard refs 放进 Ray object store；
 - 指标事件：小 payload 直接发给 `MetricsActor`，高频 token 级明细先本地聚合再上报；
 - 错误：actor method 抛出的异常由 `ControllerActor` 归一化为 health event。
 
-Ray object store 只适合样本 batch、reward batch 和中等大小 metadata。禁止用于：
+Ray object store 默认只适合样本 batch、reward batch 和中等大小 metadata。除非处于 `objectref` transfer method 的显式实验路径，否则禁止用于：
 
 - FSDP2 full state dict；
 - vLLM 权重 shard；
 - 大 tokenizer/model artifact；
 - 长期保留的 checkpoint。
 
-### 6.8 一致性边界
+### 6.9 一致性边界
 
 Bridge 层要保证下面的最小一致性：
 
@@ -1059,7 +1104,7 @@ Trainer reserve batch 时的推荐顺序：
 2. config schema 校验；
 3. 归一化为 `LaunchConfig`；
 4. 输入 artifact fail-fast 校验；
-5. `ray.init(...)`；
+5. `RayClusterController` 初始化 Ray：`auto` 先连接已有 cluster，失败后创建本机 cluster；
 6. 创建 placement group；
 7. 创建 `ControllerActor`；
 8. Controller 创建 `WeightRegistryActor`、`SampleQueueActor`、`MetricsActor`；
@@ -1243,6 +1288,7 @@ runtime:
       require_mount: true
       read_probe_timeout_sec: 10
   ray:
+    # auto: connect existing Ray cluster first; create local cluster on failure.
     address: auto
     namespace: nano-rl
     gpu_manager:
@@ -1325,6 +1371,10 @@ rollout:
   hybrid:
     enabled: true
     precision_mix: {bf16: 0.5, fp8: 0.5}
+weight_transfer:
+  method: locality_aware_checkpoint
+  allow_rollout_only_artifact_pull: true
+  max_versions_in_flight: 2
 control:
   max_policy_lag: 2
   sample_ttl_sec: 300
@@ -1339,7 +1389,10 @@ control:
 - 默认值：只用于 YAML 未显式填写的低风险字段；
 - 不设计逐字段命令行覆盖；`run.intent`、资源拓扑、模式和训练参数都写入 YAML；
 - `run.start_ray_actors` 是是否真正启动 Ray actor graph 的唯一 YAML 开关；为 `false` 时仍会输出含 backend adapter 构造参数的 `ray_launch_plan`；
+- `runtime.ray.address=auto` 是默认启动策略：先连接已有 Ray cluster，连接失败则创建本机 cluster；显式非 `auto` address 连接失败时直接报错，避免误连到本地 runtime；
 - `trainer.checkpoint_dir` 是真实 FSDP2 rank0/exporter 写入版本化 checkpoint 的目录，后续 rollout/vLLM 通过 `WeightMeta` 指向该 artifact；
+- `weight_transfer.method` 控制 trainer-to-rollout 权重传输：`objectref` 走 Ray object store refs，`locality_aware_checkpoint` 让 shared GPU 本地 reshard、rollout-only GPU 从 artifact/manifest hydrate；
+- 当 `rollout_only_gpus > 0` 且 `weight_transfer.method=locality_aware_checkpoint` 时，必须允许 `allow_rollout_only_artifact_pull=true`，否则没有 trainer-resident 权重的 rollout-only GPU 无法切到新版本；
 - 环境变量只允许用于定位默认 config 文件或展开 YAML 中显式引用的本机路径，不隐式覆盖训练语义。
 
 ### 10.1 参数归一化与校验
@@ -1363,6 +1416,7 @@ control:
 - `runtime.ray.placement.trainer.num_ranks` 必须等于 `shared_gpus`；
 - `runtime.ray.placement.rollout.num_replicas * tensor_parallel_size` 必须等于 `rollout_only_gpus + shared_gpus`；
 - `rollout_only_gpus` 和 `shared_gpus` 都必须能被 rollout `tensor_parallel_size` 整除，避免一个 vLLM TP group 横跨两种生命周期区域；
+- `weight_transfer.method=locality_aware_checkpoint` 且存在 rollout-only GPU 时，`allow_rollout_only_artifact_pull` 必须为 true；
 - `runtime.ray.gpu_manager.hybrid_toggle.offload.trainer_model` 与 `trainer_optimizer` 必须显式配置为 CPU residency，v0.1 推荐 `cpu_pinned`；
 - `hybrid_toggle.offload.rollout_engine=vllm_sleep` 时必须配置 `vllm_sleep_level`；若 backend 不支持 sleep/offload，resolved config 必须降级为 `teardown_and_reload` 并在 dry-run 中给出启动成本提示；
 - `hybrid_toggle.offload.residual_gpu_memory_budget_mb` 用于 offload 后的显存余量检查，允许保留 CUDA context/NCCL bookkeeping，但不得掩盖 model/optimizer/KV cache 未释放；

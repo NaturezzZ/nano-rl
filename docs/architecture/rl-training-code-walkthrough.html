@@ -578,7 +578,7 @@ trainer-rank-3: gpu7</code></pre>
 
         <section class="panel" id="ray">
           <h2>Ray actor 启动图</h2>
-          <p><a href="../../nano_rl/runtime/ray/placement.py"><code>build_ray_launch_plan()</code></a> 生成声明式 <code>RayLaunchPlan</code>，里面有 CPU 控制 actor、rollout replica/controller/worker、trainer rank、reward、queue、registry、metrics。<a href="../../nano_rl/runtime/ray/launcher.py"><code>RayActorGraphLauncher</code></a> 再把它转成真实 Ray actor graph。</p>
+          <p><a href="../../nano_rl/runtime/ray/placement.py"><code>build_ray_launch_plan()</code></a> 生成声明式 <code>RayLaunchPlan</code>，里面有 CPU 控制 actor、rollout replica/controller/worker、trainer rank、reward、queue、registry、metrics。<a href="../../nano_rl/runtime/ray/cluster.py"><code>RayClusterController</code></a> 负责先连接已有 Ray cluster，<code>address=auto</code> 连接失败时创建本机 cluster；随后 <a href="../../nano_rl/runtime/ray/launcher.py"><code>RayActorGraphLauncher</code></a> 把 plan 转成真实 Ray actor graph。</p>
           <div class="diagram" aria-label="Ray actor 图">
             <svg viewBox="0 0 980 430" role="img">
               <defs>
@@ -886,10 +886,11 @@ TRAINER_ACTIVE
           <p>因此，当前代码里的“训练”有两种语义要区分：</p>
           <ul>
             <li><strong>协议和状态机训练：</strong><code>run_smoke_iteration()</code> 已经完整执行，证明组件能组合。</li>
-            <li><strong>真实模型训练：</strong><code>run.start_ray_actors: true</code> 会启动 Ray actor graph；vLLM engine 与 FSDP2 optimizer/export 路径已挂到 actor adapter，但要真正跑通仍需要本机依赖、模型 artifact、<code>trainer.checkpoint_dir</code>、多 rank rendezvous 和 GPU 集成测试。</li>
+            <li><strong>真实模型训练：</strong><code>run.start_ray_actors: true</code> 会先执行 Ray connect-or-create，再启动 actor graph；vLLM engine 与 FSDP2 optimizer/export 路径已挂到 actor adapter，但要真正跑通仍需要本机依赖、模型 artifact、<code>trainer.checkpoint_dir</code>、多 rank rendezvous 和 GPU 集成测试。</li>
           </ul>
           <pre><code>RayDriver.train()
   -> build_ray_launch_plan()
+  -> RayClusterController.ensure_initialized()
   -> RayActorGraphLauncher.start()
   -> RolloutReplicaControllerActor(..., backend_config={gpu_ids, holder_ids, tensor_parallel_size})
   -> TrainerRankActor(..., backend_config={backend=fsdp2, model_path, checkpoint_dir, rank/world_size})</code></pre>

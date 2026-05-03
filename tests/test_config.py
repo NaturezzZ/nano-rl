@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from nano_rl.config import CanonicalMode, ConfigError, load_launch_config
+from nano_rl.runtime.protocols import WeightTransferMethod
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,7 @@ def test_collocated_example_resolves_to_shared_gpu_plan() -> None:
     assert config.gpu_plan.rollout_replica_count == 4
     assert config.gpu_plan.rollout_worker_count == 8
     assert config.gpu_plan.trainer_rank_count == 8
+    assert config.weight_transfer.method == WeightTransferMethod.LOCALITY_AWARE_CHECKPOINT
 
 
 def test_disaggregated_example_resolves_rollout_only_and_shared_gpu_plan() -> None:
@@ -45,6 +47,7 @@ def test_disaggregated_example_resolves_rollout_only_and_shared_gpu_plan() -> No
         (6, 7),
     ]
     assert [rank.gpu_id for rank in config.gpu_plan.trainer_ranks] == [4, 5, 6, 7]
+    assert config.weight_transfer.allow_rollout_only_artifact_pull is True
 
 
 def test_model_path_does_not_require_storage_source_type() -> None:

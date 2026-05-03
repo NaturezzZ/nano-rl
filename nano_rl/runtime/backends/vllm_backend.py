@@ -16,7 +16,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nano_rl.exceptions import SlotStateError
-from nano_rl.runtime.protocols import SampleRecord, WeightMeta
+from nano_rl.runtime.protocols import SampleRecord, WeightMeta, WeightShardSource
 from nano_rl.runtime.slot import GpuLease, RoleName
 
 
@@ -112,7 +112,13 @@ class RolloutBackend(Protocol):
     def active_weight(self) -> WeightMeta | None:
         """Currently loaded policy weights, if any."""
 
-    def activate_weight(self, meta: WeightMeta, *, lease: GpuLease | Sequence[GpuLease]) -> None:
+    def activate_weight(
+        self,
+        meta: WeightMeta,
+        *,
+        lease: GpuLease | Sequence[GpuLease],
+        transfer_source: WeightShardSource | None = None,
+    ) -> None:
         """Load or switch the engine to a weight version under a rollout lease."""
 
     def generate(
@@ -135,23 +141,35 @@ class VllmRolloutBackend:
         self._engine_factory = engine_factory or _default_engine_factory
         self._engine: Any | None = None
         self._active_weight: WeightMeta | None = None
+        self._active_weight_source: WeightShardSource | None = None
 
     @property
     def active_weight(self) -> WeightMeta | None:
         return self._active_weight
 
     @property
+    def active_weight_source(self) -> WeightShardSource | None:
+        return self._active_weight_source
+
+    @property
     def engine(self) -> Any | None:
         return self._engine
 
-    def activate_weight(self, meta: WeightMeta, *, lease: GpuLease | Sequence[GpuLease]) -> None:
+    def activate_weight(
+        self,
+        meta: WeightMeta,
+        *,
+        lease: GpuLease | Sequence[GpuLease],
+        transfer_source: WeightShardSource | None = None,
+    ) -> None:
         self._assert_rollout_lease(lease)
         if self._engine is None:
             config = self._config_for_weight(meta)
             config.apply_cuda_visible_devices()
             self._engine = self._engine_factory(config, meta)
-        _notify_engine_weight(self._engine, meta)
+        _notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
         self._active_weight = meta
+        self._active_weight_source = transfer_source
 
     def generate(
         self,
@@ -279,11 +297,17 @@ def _default_engine_factory(config: VllmBackendConfig, _meta: WeightMeta) -> Any
     return vllm.LLM(**kwargs)
 
 
-def _notify_engine_weight(engine: Any, meta: WeightMeta) -> None:
+def _notify_engine_weight(engine: Any, meta: WeightMeta, *, transfer_source: WeightShardSource | None = None) -> None:
     for method_name in ("activate_weight", "load_weight", "load_weights"):
         method = getattr(engine, method_name, None)
         if method is not None:
-            method(meta)
+            try:
+                method(meta, transfer_source=transfer_source)
+            except TypeError as exc:
+                try:
+                    method(meta)
+                except TypeError:
+                    raise exc
             return
 
 

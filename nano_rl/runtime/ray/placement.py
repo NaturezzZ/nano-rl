@@ -129,6 +129,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                     "topology": replica.topology,
                     "gpu_ids": list(replica.gpu_ids),
                     "worker_ids": list(replica.worker_ids),
+                    "weight_transfer_method": config.weight_transfer.method,
                 },
             )
         )

@@ -14,7 +14,7 @@ from nano_rl.runtime.backends import (
     build_rollout_backend,
     generation_output_to_sample_record,
 )
-from nano_rl.runtime.protocols import WeightFormat, WeightMeta
+from nano_rl.runtime.protocols import WeightFormat, WeightMeta, WeightShardSource, WeightShardSourceKind
 from nano_rl.runtime.slot import GpuLease, RoleName
 
 
@@ -41,11 +41,11 @@ class FakeVllmEngine:
     def __init__(self, config: VllmBackendConfig, meta: WeightMeta) -> None:
         self.config = config
         self.initial_meta = meta
-        self.activated: list[tuple[int, str]] = []
+        self.activated: list[tuple[int, str, str | None]] = []
         self.generate_calls: list[dict[str, object]] = []
 
-    def activate_weight(self, meta: WeightMeta) -> None:
-        self.activated.append((meta.version_id, meta.checksum))
+    def activate_weight(self, meta: WeightMeta, *, transfer_source: WeightShardSource | None = None) -> None:
+        self.activated.append((meta.version_id, meta.checksum, None if transfer_source is None else transfer_source.kind))
 
     def generate(self, prompts, *, sampling_params=None, use_tqdm=False, metadata=None):
         prompt = prompts[0]
@@ -108,7 +108,7 @@ def test_fake_engine_activate_and_generate_normalizes_vllm_output() -> None:
     assert backend.active_weight == weight
     assert engines[0].config.model_path == "/weights/v7"
     assert engines[0].config.tokenizer_path == "/tok"
-    assert engines[0].activated == [(7, "abc123")]
+    assert engines[0].activated == [(7, "abc123", None)]
     assert output.request_id == "req-1"
     assert output.prompt == "hello"
     assert output.response == "hello -> fake"
@@ -119,6 +119,34 @@ def test_fake_engine_activate_and_generate_normalizes_vllm_output() -> None:
     assert output.policy_version == 7
     assert output.weight_checksum == "abc123"
     assert output.metadata == {"controller_step": 11}
+
+
+def test_backend_forwards_weight_transfer_source_to_engine() -> None:
+    engines: list[FakeVllmEngine] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeVllmEngine:
+        engine = FakeVllmEngine(config, meta)
+        engines.append(engine)
+        return engine
+
+    backend = build_rollout_backend(
+        {"gpu_ids": (4,), "holder_id": "worker-4"},
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=4, role=RoleName.ROLLOUT, holder_id="worker-4", lease_epoch=1)
+    source = WeightShardSource(
+        replica_id="rollout-dp-2",
+        kind=WeightShardSourceKind.SHARED_GPU_RESHARD,
+        target_gpu_ids=(4,),
+        source_rank_ids=(0,),
+        source_gpu_ids=(4,),
+        reason="unit test",
+    )
+
+    backend.activate_weight(_weight(version_id=6), lease=lease, transfer_source=source)
+
+    assert backend.active_weight_source == source
+    assert engines[0].activated == [(6, "checksum", "shared_gpu_reshard")]
 
 
 def test_fake_engine_output_converts_to_sample_record() -> None:

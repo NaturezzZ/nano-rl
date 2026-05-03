@@ -22,6 +22,8 @@ runtime:
       require_mount: true
       read_probe_timeout_sec: 10
   ray:
+    # auto first connects to an existing Ray cluster; if none is reachable,
+    # startup creates a local single-machine Ray cluster.
     address: auto
     namespace: nano-rl
     gpu_manager:
@@ -112,6 +114,14 @@ rollout:
     policy_pin:
       latest_ratio: 1.0
       lagged_ratio: 0.0
+
+weight_transfer:
+  # Default production-oriented path: shared rollout GPUs reshard local FSDP2
+  # trainer state; rollout-only GPUs, when present, hydrate from artifact paths.
+  # Set method: objectref only for small-model tests or debugging.
+  method: locality_aware_checkpoint
+  allow_rollout_only_artifact_pull: true
+  max_versions_in_flight: 2
 
 control:
   max_policy_lag: 0

@@ -13,7 +13,14 @@ from hashlib import sha256
 
 from nano_rl.exceptions import SlotStateError
 from nano_rl.runtime.coordinators import GenerationRequest
-from nano_rl.runtime.protocols import SampleRecord, TrainBatch, TrainStats, WeightFormat, WeightMeta
+from nano_rl.runtime.protocols import (
+    SampleRecord,
+    TrainBatch,
+    TrainStats,
+    WeightFormat,
+    WeightMeta,
+    WeightShardSource,
+)
 from nano_rl.runtime.slot import GpuLease, RoleName
 
 
@@ -39,12 +46,24 @@ class RolloutReplicaControllerRole:
     active_policy_version: int | None = None
     active_weight_checksum: str | None = None
     active_lease_epochs: dict[int, int] | None = None
+    active_weight_source: WeightShardSource | None = None
 
-    def activate_weight(self, meta: WeightMeta, *, leases: tuple[GpuLease, ...]) -> None:
+    def activate_weight(
+        self,
+        meta: WeightMeta,
+        *,
+        leases: tuple[GpuLease, ...],
+        transfer_source: WeightShardSource | None = None,
+    ) -> None:
         self._assert_rollout_leases(leases)
+        if transfer_source is not None and transfer_source.replica_id != self.replica_id:
+            raise SlotStateError(
+                f"replica {self.replica_id} received transfer source for {transfer_source.replica_id}"
+            )
         self.active_policy_version = meta.version_id
         self.active_weight_checksum = meta.checksum
         self.active_lease_epochs = {lease.gpu_id: lease.lease_epoch for lease in leases}
+        self.active_weight_source = transfer_source
 
     def generate(
         self,
@@ -83,6 +102,7 @@ class RolloutReplicaControllerRole:
                 "gpu_ids": list(self.gpu_ids),
                 "lease_epochs": {str(lease.gpu_id): lease.lease_epoch for lease in leases},
                 "worker_ids": list(self.worker_ids),
+                "weight_transfer_kind": None if self.active_weight_source is None else self.active_weight_source.kind,
                 **request.metadata,
             },
         )

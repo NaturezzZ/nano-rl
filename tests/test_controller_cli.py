@@ -72,6 +72,9 @@ def test_controller_smoke_iteration_composes_runtime_modules() -> None:
     assert len(result["train_stats"]) == 4
     assert result["queue"]["acked"] == 2
     assert all(state["phase"] == "ROLLOUT_ACTIVE" for state in result["rollout_states"])
+    assert result["weight_transfer_plan"]["method"] == "locality_aware_checkpoint"
+    assert result["weight_transfer_plan"]["sources"]["rollout-dp-0"]["kind"] == "artifact_pull"
+    assert result["weight_transfer_plan"]["sources"]["rollout-dp-2"]["kind"] == "shared_gpu_reshard"
 
 
 def test_controller_accepts_prompt_backlog_and_pumps_rollout() -> None:

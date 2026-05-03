@@ -61,6 +61,7 @@ properties:
         properties:
           address:
             type: string
+            description: Ray address. auto first tries to connect to an existing cluster; if no cluster is reachable, startup creates a single-machine local Ray cluster with the resolved node custom resources. Explicit non-auto addresses keep fail-fast connection semantics.
           namespace:
             type: string
             minLength: 1
@@ -270,6 +271,27 @@ properties:
             properties:
               latest_ratio: { type: number, minimum: 0, maximum: 1 }
               lagged_ratio: { type: number, minimum: 0, maximum: 1 }
+  weight_transfer:
+    type: object
+    description: >
+      Independent trainer-to-rollout weight transfer policy. objectref
+      materializes weights through Ray object store refs.
+      locality_aware_checkpoint keeps large tensors out of Ray object store:
+      shared rollout GPUs reshard local FSDP2 state, and rollout-only GPUs
+      hydrate from artifact or manifest paths.
+    properties:
+      method:
+        type: string
+        enum: [objectref, locality_aware_checkpoint]
+        default: locality_aware_checkpoint
+      allow_rollout_only_artifact_pull:
+        type: boolean
+        default: true
+        description: Required for locality_aware_checkpoint when rollout_only_gpus are present, because those GPUs do not own trainer-resident FSDP2 shards.
+      max_versions_in_flight:
+        type: integer
+        minimum: 1
+        default: 2
   control:
     type: object
     required: [max_policy_lag, sample_ttl_sec, queue_high_watermark, max_pending_rollout_refs, max_pending_train_refs]

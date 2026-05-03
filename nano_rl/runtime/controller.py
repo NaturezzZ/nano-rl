@@ -18,6 +18,7 @@ from nano_rl.runtime.roles import (
 from nano_rl.runtime.sample_queue import QueueError, SampleQueueActorCore
 from nano_rl.runtime.slot import GpuLease, GpuLeaseManagerCore, RoleName
 from nano_rl.runtime.weight_registry import WeightRegistryActorCore
+from nano_rl.runtime.weight_transfer import WeightTransferPlanner
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,11 @@ class ControllerCore:
             queue_high_watermark=launch_config.control.queue_high_watermark,
         )
         self.weight_registry = WeightRegistryActorCore()
+        self.weight_transfer = WeightTransferPlanner(
+            method=launch_config.weight_transfer.method,
+            allow_rollout_only_artifact_pull=launch_config.weight_transfer.allow_rollout_only_artifact_pull,
+        )
+        self.last_weight_transfer_plan = None
         self.gpu_leases = GpuLeaseManagerCore(launch_config.gpu_plan)
         toggle = launch_config.runtime.ray.gpu_manager.hybrid_toggle
         self.gpu_residency = GpuResidencyManagerCore(
@@ -111,6 +117,7 @@ class ControllerCore:
         plan["queue"] = self.sample_queue.stats()
         plan["rollout_manager"] = self.rollout_manager.stats()
         plan["trainer_coordinator"] = self.trainer_coordinator.to_dict()
+        plan["weight_transfer"] = self.launch_config.weight_transfer.model_dump(mode="json")
         return plan
 
     def enter_train_window(self) -> list[dict[str, object]]:
@@ -295,21 +302,36 @@ class ControllerCore:
             "train_stats": [stats.model_dump(mode="json") for stats in train_stats],
             "train_window_states": train_window_states,
             "rollout_states": rollout_states,
+            "weight_transfer_plan": (
+                None
+                if self.last_weight_transfer_plan is None
+                else self.last_weight_transfer_plan.model_dump(mode="json")
+            ),
             "queue": self.sample_queue.stats(),
             "registry": [meta.model_dump(mode="json") for meta in self.weight_registry.all_versions()],
         }
 
     def _activate_weight_for_rollout(self, meta: WeightMeta) -> WeightMeta:
         replica_ids = set(self.rollout_roles)
+        transfer_plan = self.weight_transfer.build_plan(
+            meta,
+            rollout_replicas=self.launch_config.gpu_plan.rollout_replicas,
+            trainer_ranks=self.launch_config.gpu_plan.trainer_ranks,
+        )
         self.rollout_manager.pause_for_weight(f"activate-v{meta.version_id}")
         self.weight_registry.begin_activation(meta.version_id, replica_ids)
         active = meta
         try:
             for replica_id, role in self.rollout_roles.items():
                 leases = self._rollout_leases_for_replica(role)
-                role.activate_weight(meta, leases=leases)
+                role.activate_weight(
+                    meta,
+                    leases=leases,
+                    transfer_source=transfer_plan.source_for_replica(replica_id),
+                )
                 self._assert_rollout_leases_current(leases)
                 active = self.weight_registry.ack_activation(meta.version_id, replica_id)
+            self.last_weight_transfer_plan = transfer_plan
             self.rollout_manager.resume()
             return active
         except Exception:

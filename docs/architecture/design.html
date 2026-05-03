@@ -376,7 +376,7 @@
         <div class="meta"><b>设计阶段</b><span>design-first / no full runtime yet</span></div>
         <div class="meta"><b>用户入口</b><span>main.py -> YAML -> LaunchConfig</span></div>
         <div class="meta"><b>执行层</b><span>single-machine Ray-native actors</span></div>
-        <div class="meta"><b>源同步日期</b><span>2026-05-02</span></div>
+        <div class="meta"><b>源同步日期</b><span>2026-05-03</span></div>
       </div>
     </header>
 
@@ -387,6 +387,7 @@
       <a href="#rollout-svg">rollout 流程图</a>
       <a href="#modes">运行模式</a>
       <a href="#components">组件设计</a>
+      <a href="#weight-transfer">权重传输</a>
       <a href="#actors">Ray actor 清单</a>
       <a href="#protocols">协议与状态</a>
       <a href="#risks">约束与风险</a>
@@ -432,7 +433,7 @@
       <div class="grid-3">
         <div class="box">
           <h3>Control plane</h3>
-          <p><code>main.py</code> 读取 YAML，校验并归一化成 <code>LaunchConfig</code>。Ray Driver 初始化 runtime，创建 <code>ControllerActor</code>，由 controller 驱动模式 FSM、train window、rollout 节奏和故障恢复。</p>
+          <p><code>main.py</code> 读取 YAML，校验并归一化成 <code>LaunchConfig</code>。Ray Driver 通过 <code>RayClusterController</code> 初始化 runtime：<code>address=auto</code> 先连已有 cluster，失败后创建本机 cluster，再创建 <code>ControllerActor</code> 并由 controller 驱动模式 FSM、train window、rollout 节奏和故障恢复。</p>
         </div>
         <div class="box">
           <h3>Resource plane</h3>
@@ -440,11 +441,11 @@
         </div>
         <div class="box">
           <h3>Data plane</h3>
-          <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 指向 backend loader 可读取的模型或 checkpoint artifact，不把大权重放进 Ray object store。</p>
+          <p>rollout 样本通过 Ray ObjectRef 进入 <code>SampleQueueActor</code>，trainer 通过 reservation 消费。权重通过 <code>WeightMeta</code> 和 <code>WeightTransferPlan</code> 指向 backend loader 可读取的模型或 checkpoint artifact；默认不把大权重放进 Ray object store。</p>
         </div>
         <div class="box">
           <h3>Execution backends</h3>
-          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph。</p>
+          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph。</p>
         </div>
       </div>
     </section>
@@ -476,7 +477,7 @@
 
           <rect x="262" y="84" width="180" height="64" class="svg-box"></rect>
           <text x="284" y="111" class="svg-label">Ray Driver</text>
-          <text x="284" y="132" class="svg-small">ray.init / placement</text>
+          <text x="284" y="132" class="svg-small">connect-or-create Ray</text>
 
           <rect x="506" y="76" width="210" height="80" class="svg-box svg-violet"></rect>
           <text x="528" y="105" class="svg-label">ControllerActor</text>
@@ -656,7 +657,7 @@
 
           <rect x="320" y="498" width="214" height="74" class="svg-box svg-green"></rect>
           <text x="344" y="526" class="svg-label">15. wake rollout</text>
-          <text x="344" y="548" class="svg-small">校验 rollout lease 后加载 WeightMeta</text>
+          <text x="344" y="548" class="svg-small">按 WeightTransferPlan 加载或 reshard</text>
 
           <rect x="38" y="498" width="214" height="74" class="svg-box svg-green"></rect>
           <text x="62" y="526" class="svg-label">16. resume prompt</text>
@@ -719,7 +720,7 @@
         </div>
         <div class="box">
           <h3>Ray Driver</h3>
-          <p>负责 <code>ray.init</code>、单机资源校验、placement group 规划和创建 <code>ControllerActor</code>。v0.1 不加入 Kubernetes、Slurm、SSH 或多节点 Ray launcher。</p>
+          <p>负责 Ray connect-or-create、单机资源校验、placement group 规划和创建 <code>ControllerActor</code>。<code>runtime.ray.address=auto</code> 先尝试连接已有 cluster；连不上时创建带 resolved custom resources 的本机 Ray cluster。显式非 <code>auto</code> address 保持 fail-fast。v0.1 不加入 Kubernetes、Slurm、SSH 或多节点 Ray launcher。</p>
         </div>
         <div class="box">
           <h3><code>ControllerActor</code></h3>
@@ -754,6 +755,10 @@
           <p>权重版本 owner，区分 <code>REGISTERED</code> 和 <code>ACTIVE_GLOBAL</code>。trainer 注册 artifact 不代表 rollout 已经切换；只有所有必要 rollout workers ack 目标版本后才能全局 active。</p>
         </div>
         <div class="box">
+          <h3><code>WeightTransferPlanner</code></h3>
+          <p>独立的权重传输模块。它根据 <code>weight_transfer.method</code>、rollout replica GPU 集合和 trainer rank 映射生成 per-replica <code>WeightTransferPlan</code>，把 objectref、小心的本地 reshard、artifact hydrate 分开。</p>
+        </div>
+        <div class="box">
           <h3><code>RewardActorPool</code></h3>
           <p>负责 rule reward、model reward 或后处理。它不拥有训练 loop，只把 reward 或 reward ref 附到样本数据路径中。</p>
         </div>
@@ -761,6 +766,35 @@
           <h3><code>MetricsActor</code> / health sink</h3>
           <p>接收指标、事件和 tracing payload。高频 token 级明细应先本地聚合，低频事件直接上报。Controller 依据连续阈值而不是单点指标做降级。</p>
         </div>
+      </div>
+    </section>
+
+    <section id="weight-transfer">
+      <h2>权重传输模块</h2>
+      <p>
+        FSDP2 每个 optimizer step 之后，trainer/exporter 先发布新的 <code>WeightMeta</code> 和 artifact/manifest；
+        随后 <code>WeightTransferPlanner</code> 为每个 rollout DP replica 生成 <code>WeightShardSource</code>。
+        这个模块不拥有训练 loop，也不写 registry 状态，只决定“这个 replica 从哪里 materialize 目标版本”。
+      </p>
+      <div class="grid-3">
+        <div class="box">
+          <h3><code>objectref</code></h3>
+          <p>显式实验路径。权重对象或 shard refs 进入 Ray object store，rollout 侧按 <code>ray_object_ref</code> source 拉取。适合小模型、fake backend 和调试；真实大模型会给 object store、序列化和 fan-out 带来压力。</p>
+        </div>
+        <div class="box">
+          <h3><code>shared_gpu_reshard</code></h3>
+          <p>默认路径中的 shared GPU 分支。目标 rollout TP group 的 GPU 全部也是 trainer ranks 所在 GPU；训练窗口结束后，lease 切回 rollout，backend 把本地 FSDP2 shard 或 CPU standby state reshard 成 vLLM TP layout。</p>
+        </div>
+        <div class="box">
+          <h3><code>artifact_pull</code></h3>
+          <p>默认路径中的 rollout-only 分支。没有 trainer-resident 权重的 rollout-only GPU 从 <code>artifact_uri</code> / <code>manifest_uri</code> hydrate 需要的 vLLM shard，避免把整份权重通过 ObjectRef 广播。</p>
+        </div>
+      </div>
+      <div class="callout">
+        <p>
+          配置入口是 <code>weight_transfer.method</code>：默认 <code>locality_aware_checkpoint</code>，也可切到 <code>objectref</code>。
+          当存在 <code>rollout_only_gpus</code> 时，locality-aware 路径必须允许 artifact pull；否则这些 GPU 没有任何本地 trainer shard 可重组。
+        </p>
       </div>
     </section>
 
@@ -836,6 +870,12 @@
             <td>接收 trainer export 后的 <code>WeightMeta</code>；供 rollout coordinator 选择版本；等待 rollout workers ack 后标记 <code>ACTIVE_GLOBAL</code>。</td>
           </tr>
           <tr>
+            <td><code>WeightTransferPlanner</code></td>
+            <td>CPU module</td>
+            <td>生成 per-version/per-replica 的权重传输计划，不承载大 tensor。</td>
+            <td>读取 <code>WeightMeta</code>、<code>ResolvedGpuPlan</code> 和 <code>weight_transfer.method</code>；输出 <code>ray_object_ref</code>、<code>shared_gpu_reshard</code> 或 <code>artifact_pull</code> source。</td>
+          </tr>
+          <tr>
             <td><code>RewardActor</code> / <code>RewardActorPool</code></td>
             <td>CPU actor；未来可选 GPU</td>
             <td>reward function、rule reward、model reward 或样本后处理。</td>
@@ -866,7 +906,11 @@
         </div>
         <div class="box">
           <h3><code>WeightMeta</code></h3>
-          <p>必须包含 <code>version_id</code>、创建时间、model path、format 和 checksum。模型与 checkpoint path 不要求声明 source type；大权重不经 Ray object store 广播。</p>
+          <p>必须包含 <code>version_id</code>、创建时间、model path、format 和 checksum。模型与 checkpoint path 不要求声明 source type；默认大权重不经 Ray object store 广播。</p>
+        </div>
+        <div class="box">
+          <h3><code>WeightTransferPlan</code></h3>
+          <p>per-version/per-replica 控制面协议，记录 <code>objectref</code>、<code>shared_gpu_reshard</code> 或 <code>artifact_pull</code> source。它只带 source metadata，不携带真实 tensor。</p>
         </div>
         <div class="box">
           <h3><code>TrainBatch</code></h3>
@@ -905,6 +949,7 @@
         <li><strong>Topology gate：</strong><code>rollout_only_gpus</code> 表示只支持 rollout lease；这类 GPU 的 trainer lease 请求必须返回 unsupported role。</li>
         <li><strong>bounded staleness：</strong><code>standalone_hybrid</code> 允许旧权重样本，但必须受 <code>max_policy_lag</code>、TTL、drop/degrade 策略约束，不能演化成无界 async。</li>
         <li><strong>权重状态：</strong><code>REGISTERED</code> 只代表 artifact 可用，不代表 rollout 已经服务该版本。全局恢复 prompt 前必须在当前 rollout lease epoch 下收齐 activation ack；激活失败的目标版本必须标记为 <code>FAILED</code>。</li>
+        <li><strong>权重传输：</strong><code>objectref</code> 只应作为显式配置的实验路径；默认 <code>locality_aware_checkpoint</code> 要让 shared GPU 本地 reshard，并让 rollout-only GPU 从 artifact/manifest hydrate。</li>
         <li><strong>queue ack：</strong>trainer 失败时不能丢样本。queue ack 必须在 optimizer step 成功之后；失败路径 release reservation 或标记不可重试。</li>
         <li><strong>process group：</strong>高频 toggle 不应 destroy/reinit FSDP2 process group，否则正常调度路径会变成容易 deadlock 的路径。</li>
         <li><strong>v0.1 范围：</strong>不加入多机 Ray、Kubernetes、Slurm、SSH launcher；rollout TP 通过 <code>RolloutReplicaControllerActor</code> 管理，不能让 TP group 横跨 rollout-only/shared 生命周期区域。</li>

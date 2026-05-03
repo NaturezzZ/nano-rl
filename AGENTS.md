@@ -93,8 +93,18 @@ Canonical documents:
 - `run.start_ray_actors` controls whether `RayDriver.train()` actually starts
   the Ray actor graph. With the default `false`, train emits a backend-integrated
   plan only.
+- When `run.start_ray_actors` is true and `runtime.ray.address` is `auto`,
+  startup must try to connect to an existing Ray cluster first and create a
+  local single-machine Ray cluster only if that connection fails. Explicit
+  non-`auto` Ray addresses must fail fast instead of silently falling back to
+  local runtime.
 - Weight and sample protocols must carry policy/version metadata. Do not add
   data paths that bypass `policy_version` / weight version accounting.
+- Trainer-to-rollout weight transfer is an independent module. Keep
+  `weight_transfer.method` pluggable; `objectref` is the explicit Ray object
+  store path, while the default `locality_aware_checkpoint` path should reshard
+  weights already resident on shared GPUs and hydrate rollout-only GPUs from
+  artifact/manifest paths.
 - In `standalone_hybrid`, enforce bounded staleness with policy lag, sample TTL,
   and drop/degrade behavior rather than unbounded async training.
 
@@ -114,6 +124,9 @@ Canonical documents:
 - Preserve YAML-first semantics. Do not add per-field command-line overrides;
   `run.intent`, resource topology, mode, and training parameters belong in YAML.
 - Keep schemas and examples synchronized when changing protocol fields.
+- Keep `docs/protocols/weight-transfer-plan.schema.yaml`, examples, and the
+  Python `nano_rl.runtime.weight_transfer` module synchronized when changing
+  trainer-to-rollout weight movement.
 - Keep `runtime.ray.gpu_manager.topology` consistent with placement fields:
   `trainer.num_ranks == shared_gpus`, and
   `rollout.num_replicas * rollout.tensor_parallel_size ==

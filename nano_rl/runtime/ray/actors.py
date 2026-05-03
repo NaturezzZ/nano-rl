@@ -13,7 +13,14 @@ from nano_rl.runtime.backends import (
 )
 from nano_rl.runtime.coordinators import GenerationRequest, RolloutManagerCore, TrainerCoordinatorCore
 from nano_rl.runtime.metrics import MetricsActorCore
-from nano_rl.runtime.protocols import EventSeverity, SampleRecord, TrainBatch, TrainStats, WeightMeta
+from nano_rl.runtime.protocols import (
+    EventSeverity,
+    SampleRecord,
+    TrainBatch,
+    TrainStats,
+    WeightMeta,
+    WeightShardSource,
+)
 from nano_rl.runtime.roles import (
     RewardActorRole,
     RolloutReplicaControllerRole,
@@ -148,12 +155,18 @@ def build_rollout_replica_controller_actor_class():
                 resolved = VllmBackendConfig.model_validate(backend_config)
                 self._backend = VllmRolloutBackend(resolved)
 
-        def activate_weight(self, meta: dict[str, object], leases: list[dict[str, object]]) -> None:
+        def activate_weight(
+            self,
+            meta: dict[str, object],
+            leases: list[dict[str, object]],
+            transfer_source: dict[str, object] | None = None,
+        ) -> None:
             weight = WeightMeta.model_validate(meta)
             parsed_leases = tuple(GpuLease.model_validate(lease) for lease in leases)
-            self._role.activate_weight(weight, leases=parsed_leases)
+            parsed_source = None if transfer_source is None else WeightShardSource.model_validate(transfer_source)
+            self._role.activate_weight(weight, leases=parsed_leases, transfer_source=parsed_source)
             if self._backend is not None:
-                self._backend.activate_weight(weight, lease=parsed_leases)
+                self._backend.activate_weight(weight, lease=parsed_leases, transfer_source=parsed_source)
 
         def generate(self, request: dict[str, object], leases: list[dict[str, object]]) -> dict[str, object]:
             parsed_request = GenerationRequest(**request)
@@ -194,6 +207,9 @@ def build_rollout_replica_controller_actor_class():
                 "active_policy_version": self._role.active_policy_version,
                 "active_weight_checksum": self._role.active_weight_checksum,
                 "active_lease_epochs": self._role.active_lease_epochs,
+                "active_weight_source": (
+                    None if self._role.active_weight_source is None else self._role.active_weight_source.model_dump(mode="json")
+                ),
                 "backend": None if self._backend is None else type(self._backend).__name__,
             }
 

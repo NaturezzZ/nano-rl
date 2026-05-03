@@ -15,6 +15,10 @@ class InvalidInputArtifactError(ConfigError):
     """A configured model, tokenizer, or dataset artifact failed validation."""
 
 
+class RayClusterError(NanoRLError):
+    """Ray cluster startup or connection error."""
+
+
 class SlotError(NanoRLError):
     """Base class for slot state and capability errors."""
 

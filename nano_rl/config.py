@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nano_rl.exceptions import ConfigError
+from nano_rl.runtime.protocols import WeightTransferMethod
 from nano_rl.runtime.slot import (
     GpuTopology,
     ResolvedGpuPlan,
@@ -259,6 +260,12 @@ class ControlConfig(BaseModel):
     max_pending_train_refs: int = Field(ge=1)
 
 
+class WeightTransferConfig(BaseModel):
+    method: WeightTransferMethod = WeightTransferMethod.LOCALITY_AWARE_CHECKPOINT
+    allow_rollout_only_artifact_pull: bool = True
+    max_versions_in_flight: int = Field(default=2, ge=1)
+
+
 class RuntimeConfig(BaseModel):
     """User-facing YAML configuration."""
 
@@ -273,6 +280,7 @@ class RuntimeConfig(BaseModel):
     algorithm: AlgorithmConfig
     trainer: TrainerConfig
     rollout: RolloutConfig
+    weight_transfer: WeightTransferConfig = Field(default_factory=WeightTransferConfig)
     control: ControlConfig
 
     @model_validator(mode="after")
@@ -358,6 +366,16 @@ class RuntimeConfig(BaseModel):
         if self.parallel.trainer.pipeline_parallel_size != 1:
             raise ValueError("v0.1 requires trainer.pipeline_parallel_size=1")
 
+        if (
+            self.weight_transfer.method == WeightTransferMethod.LOCALITY_AWARE_CHECKPOINT
+            and topology.rollout_only_gpus > 0
+            and not self.weight_transfer.allow_rollout_only_artifact_pull
+        ):
+            raise ValueError(
+                "locality_aware_checkpoint requires allow_rollout_only_artifact_pull=true "
+                "when rollout_only_gpus>0"
+            )
+
         if self.data.source_type not in self.runtime.storage.allowed_input_sources:
             raise ValueError("data.source_type must be listed in allowed_input_sources")
 
@@ -389,6 +407,7 @@ class LaunchConfig(BaseModel):
     algorithm: AlgorithmConfig
     trainer: TrainerConfig
     rollout: RolloutConfig
+    weight_transfer: WeightTransferConfig
     control: ControlConfig
     gpu_plan: ResolvedGpuPlan
 
@@ -405,6 +424,7 @@ class LaunchConfig(BaseModel):
             algorithm=config.algorithm,
             trainer=config.trainer,
             rollout=config.rollout,
+            weight_transfer=config.weight_transfer,
             control=config.control,
             gpu_plan=_build_gpu_plan(config),
         )

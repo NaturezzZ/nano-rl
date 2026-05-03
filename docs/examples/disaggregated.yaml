@@ -20,6 +20,8 @@ runtime:
       require_mount: true
       read_probe_timeout_sec: 10
   ray:
+    # auto first connects to an existing Ray cluster; if none is reachable,
+    # startup creates a local single-machine Ray cluster.
     address: auto
     namespace: nano-rl
     gpu_manager:
@@ -110,6 +112,14 @@ rollout:
     policy_pin:
       latest_ratio: 0.8
       lagged_ratio: 0.2
+
+weight_transfer:
+  # Shared rollout replicas can reshard from local trainer state after the
+  # train window. Rollout-only replicas have no trainer-resident weights, so
+  # they hydrate from the version artifact/manifest instead of Ray ObjectRefs.
+  method: locality_aware_checkpoint
+  allow_rollout_only_artifact_pull: true
+  max_versions_in_flight: 2
 
 control:
   max_policy_lag: 2

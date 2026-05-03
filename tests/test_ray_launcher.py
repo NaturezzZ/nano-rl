@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from nano_rl.config import load_launch_config
+from nano_rl.exceptions import RayClusterError
+from nano_rl.runtime.ray.cluster import RayClusterController
 from nano_rl.runtime.ray.driver import RayDriver
 from nano_rl.runtime.ray.launcher import RayActorGraphLauncher, RemoteActorClassBuilder
 from nano_rl.runtime.ray.placement import build_ray_launch_plan
@@ -32,6 +36,33 @@ class FakeRemoteActorClass:
         }
         self.calls.append(handle)
         return handle
+
+
+class FakeRayModule:
+    def __init__(
+        self,
+        *,
+        fail_auto_connect: bool = False,
+        fail_every_connect: bool = False,
+        initialized: bool = False,
+    ) -> None:
+        self.fail_auto_connect = fail_auto_connect
+        self.fail_every_connect = fail_every_connect
+        self.initialized = initialized
+        self.init_calls: list[dict[str, Any]] = []
+
+    def is_initialized(self) -> bool:
+        return self.initialized
+
+    def init(self, **kwargs: Any) -> object:
+        self.init_calls.append(kwargs)
+        address = kwargs.get("address")
+        if self.fail_every_connect and address:
+            raise RuntimeError("connection failed")
+        if self.fail_auto_connect and address == "auto":
+            raise RuntimeError("no cluster found")
+        self.initialized = True
+        return object()
 
 
 def _fake_builders(
@@ -127,6 +158,76 @@ def test_actor_graph_dry_run_does_not_create_remote_actors() -> None:
     assert graph.handles == {}
     assert calls == []
     assert graph.resource_summary["actors_requesting_ray_gpus"] == []
+
+
+def test_ray_cluster_controller_auto_connects_existing_cluster() -> None:
+    ray = FakeRayModule()
+    result = RayClusterController(
+        namespace="nano-rl",
+        ray_address="auto",
+        node_custom_resources={"rollout_gpu_0": 1},
+        ray_module=ray,
+    ).ensure_initialized()
+
+    assert result.startup_mode == "connected_existing"
+    assert result.created_local_cluster is False
+    assert ray.init_calls == [{"namespace": "nano-rl", "address": "auto"}]
+
+
+def test_ray_cluster_controller_auto_falls_back_to_local_cluster() -> None:
+    ray = FakeRayModule(fail_auto_connect=True)
+    result = RayClusterController(
+        namespace="nano-rl",
+        ray_address="auto",
+        node_custom_resources={"rollout_gpu_0": 1, "train_gpu_0": 1},
+        ray_module=ray,
+    ).ensure_initialized()
+
+    assert result.startup_mode == "created_local_after_auto_failed"
+    assert result.created_local_cluster is True
+    assert result.fallback_reason == "RuntimeError: no cluster found"
+    assert ray.init_calls == [
+        {"namespace": "nano-rl", "address": "auto"},
+        {
+            "namespace": "nano-rl",
+            "resources": {"rollout_gpu_0": 1, "train_gpu_0": 1},
+        },
+    ]
+
+
+def test_ray_cluster_controller_explicit_address_fails_without_local_fallback() -> None:
+    ray = FakeRayModule(fail_every_connect=True)
+
+    with pytest.raises(RayClusterError, match="failed to connect to Ray cluster"):
+        RayClusterController(
+            namespace="nano-rl",
+            ray_address="ray://head:10001",
+            node_custom_resources={"rollout_gpu_0": 1},
+            ray_module=ray,
+        ).ensure_initialized()
+
+    assert ray.init_calls == [{"namespace": "nano-rl", "address": "ray://head:10001"}]
+
+
+def test_actor_graph_launcher_records_auto_fallback_cluster_startup() -> None:
+    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    plan = build_ray_launch_plan(config)
+    calls: list[dict[str, Any]] = []
+    ray = FakeRayModule(fail_auto_connect=True)
+
+    graph = RayActorGraphLauncher(
+        plan,
+        namespace=config.runtime.ray.namespace,
+        actor_class_builders=_fake_builders({spec.actor_type for spec in plan.actors}, calls),
+        start_ray=True,
+        ray_address="auto",
+        ray_module=ray,
+    ).start(dry_run=False)
+
+    assert graph.ray_cluster is not None
+    assert graph.ray_cluster.startup_mode == "created_local_after_auto_failed"
+    assert graph.to_dict()["ray_cluster"]["created_local_cluster"] is True
+    assert "controller" in graph.handles
 
 
 def test_ray_driver_train_still_returns_plan_without_starting_actor_graph(monkeypatch) -> None:

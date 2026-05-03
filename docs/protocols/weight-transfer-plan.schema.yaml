@@ -1,0 +1,40 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: WeightTransferPlan
+type: object
+required: [version_id, method, sources]
+properties:
+  version_id: { type: integer, minimum: 0 }
+  method:
+    type: string
+    enum: [objectref, locality_aware_checkpoint]
+  artifact_uri: { type: string, minLength: 1 }
+  manifest_uri: { type: string, minLength: 1 }
+  metadata:
+    type: object
+    additionalProperties: true
+  sources:
+    type: object
+    additionalProperties:
+      type: object
+      required: [replica_id, kind, reason]
+      properties:
+        replica_id: { type: string, minLength: 1 }
+        kind:
+          type: string
+          enum: [ray_object_ref, shared_gpu_reshard, artifact_pull]
+        target_gpu_ids:
+          type: array
+          items: { type: integer, minimum: 0 }
+        target_worker_ids:
+          type: array
+          items: { type: string, minLength: 1 }
+        source_rank_ids:
+          type: array
+          items: { type: integer, minimum: 0 }
+        source_gpu_ids:
+          type: array
+          items: { type: integer, minimum: 0 }
+        artifact_uri: { type: string, minLength: 1 }
+        manifest_uri: { type: string, minLength: 1 }
+        object_ref_key: { type: string, minLength: 1 }
+        reason: { type: string, minLength: 1 }
