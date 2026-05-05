@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_ray_launch_plan_uses_role_scoped_gpu_resources() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     plan = build_ray_launch_plan(config)
 
     assert plan.actors_requesting_ray_gpus == ()
@@ -80,7 +80,7 @@ def test_ray_launch_plan_uses_role_scoped_gpu_resources() -> None:
 
 
 def test_ray_driver_dry_run_includes_launch_plan() -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
     dry_run = RayDriver(config).dry_run()
     actors = dry_run["ray_launch_plan"]["actors"]
 

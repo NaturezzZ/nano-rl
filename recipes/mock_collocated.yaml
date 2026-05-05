@@ -1,0 +1,136 @@
+# CPU-only mock path that starts the local Ray actor graph in collocated mode.
+# GPU ids are logical topology slots used by the lease manager; no CUDA device
+# backend is mocked separately.
+run:
+  intent: train
+  emit_resolved_config: false
+  start_ray_actors: true
+
+mock:
+  enabled: true
+  seed: 7
+
+runtime:
+  backend: ray
+  local:
+    num_gpus: 2
+    cpus: 8
+  storage:
+    allowed_input_sources: [mock_inline, mock_generated, mock_jsonl]
+  ray:
+    address: auto
+    namespace: nano-rl-mock
+    gpu_manager:
+      enabled: true
+      lease_manager: true
+      role_classes:
+        rollout_manager: nano_rl.runtime.roles.RolloutManagerRole
+        rollout_replica_controller: nano_rl.runtime.roles.RolloutReplicaControllerRole
+        rollout_worker: nano_rl.runtime.roles.RolloutWorkerRole
+        trainer_rank: nano_rl.runtime.roles.TrainerRankRole
+      topology:
+        rollout_only_gpus: 0
+        shared_gpus: 2
+        idle_gpus: 0
+      hybrid_toggle:
+        strategy: swap_on_toggle
+        rollout_drain_timeout_sec: 5
+        train_drain_timeout_sec: 5
+        cuda_quiesce_timeout_sec: 5
+        offload:
+          trainer_model: cpu
+          trainer_optimizer: cpu
+          rollout_engine: teardown_and_reload
+          cpu_memory_budget_gb: 8
+          residual_gpu_memory_budget_mb: 0
+    placement:
+      trainer:
+        num_ranks: 2
+        gpus_per_rank: 1
+        cpus_per_rank: 1
+      rollout:
+        num_replicas: 1
+        gpus_per_replica: 2
+        tensor_parallel_size: 2
+      reward:
+        num_actors: 1
+        cpus_per_actor: 1
+
+mode: collocated
+
+parallel:
+  trainer:
+    data_parallel_size: 2
+    fsdp_world_size: 2
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+  rollout:
+    data_parallel_size: 1
+    tensor_parallel_size: 2
+
+model:
+  model_path: mock://models/tiny-policy
+  tokenizer_path: mock://models/tiny-tokenizer
+
+data:
+  source_type: mock_inline
+  prompt_column: prompt
+  mock_inline:
+    repeat: 2
+    prompts:
+      - "Explain lease ownership in one sentence."
+      - "Generate a tiny deterministic reward example."
+
+algorithm:
+  name: ppo
+  max_steps: 3
+  learning_rate: 1.0e-6
+  seed: 7
+
+trainer:
+  backend: mock
+  global_batch_size: 4
+  mock:
+    initial_loss: 1.0
+    loss_decay: reciprocal
+    export_format: vllm_compatible
+    optimizer_state: tracked
+    require_rank0_export: true
+
+rollout:
+  backend: mock
+  mock:
+    response_template: "{prompt} :: mock-response@v{policy_version}"
+    max_response_tokens: 16
+  partial_rollout:
+    enabled: false
+    pause_mode: keep
+    clear_cache: true
+    mixed_policy_samples: drop
+  hybrid:
+    enabled: true
+    policy_pin:
+      latest_ratio: 1.0
+      lagged_ratio: 0.0
+
+reward:
+  backend: mock
+  mock:
+    name: deterministic_length_reward
+    scale: 100.0
+    cap: 1.0
+
+weight_transfer:
+  method: locality_aware_checkpoint
+  allow_rollout_only_artifact_pull: true
+  max_versions_in_flight: 2
+  store:
+    backend: mock_filesystem
+    manifest_dir: ./.nano-rl-mock/collocated/weights
+
+control:
+  max_policy_lag: 0
+  sample_ttl_sec: 60
+  queue_high_watermark: 32
+  max_pending_rollout_refs: 8
+  max_pending_train_refs: 4

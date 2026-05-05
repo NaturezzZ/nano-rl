@@ -26,7 +26,7 @@ def _weight(version_id: int = 3) -> WeightMeta:
 
 
 def test_locality_aware_transfer_reshards_shared_replicas_and_pulls_rollout_only_artifacts() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     planner = WeightTransferPlanner(
         method=config.weight_transfer.method,
         allow_rollout_only_artifact_pull=config.weight_transfer.allow_rollout_only_artifact_pull,
@@ -49,7 +49,7 @@ def test_locality_aware_transfer_reshards_shared_replicas_and_pulls_rollout_only
 
 
 def test_objectref_transfer_config_uses_ray_object_ref_sources_for_every_replica() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     planner = WeightTransferPlanner(method=WeightTransferMethod.OBJECT_REF)
 
     plan = planner.build_plan(
@@ -64,7 +64,7 @@ def test_objectref_transfer_config_uses_ray_object_ref_sources_for_every_replica
 
 
 def test_locality_aware_transfer_requires_artifact_pull_for_rollout_only_gpus() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     planner = WeightTransferPlanner(
         method=WeightTransferMethod.LOCALITY_AWARE_CHECKPOINT,
         allow_rollout_only_artifact_pull=False,
@@ -79,7 +79,7 @@ def test_locality_aware_transfer_requires_artifact_pull_for_rollout_only_gpus() 
 
 
 def test_config_rejects_locality_aware_transfer_without_rollout_only_artifact_pull(tmp_path: Path) -> None:
-    raw = (ROOT / "docs/examples/disaggregated.yaml").read_text()
+    raw = (ROOT / "recipes/disaggregated.yaml").read_text()
     raw = raw.replace("allow_rollout_only_artifact_pull: true", "allow_rollout_only_artifact_pull: false")
     config_path = tmp_path / "invalid-weight-transfer.yaml"
     config_path.write_text(raw)

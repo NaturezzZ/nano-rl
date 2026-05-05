@@ -15,6 +15,7 @@ from nano_rl.runtime.roles import (
     TrainerRankRole,
     bootstrap_weight_meta,
 )
+from nano_rl.runtime.reward_backend import build_reward_backend
 from nano_rl.runtime.sample_queue import QueueError, SampleQueueActorCore
 from nano_rl.runtime.slot import GpuLease, GpuLeaseManagerCore, RoleName
 from nano_rl.runtime.weight_registry import WeightRegistryActorCore
@@ -85,7 +86,7 @@ class ControllerCore:
             )
             for replica in launch_config.gpu_plan.rollout_replicas
         }
-        self.reward_role = RewardActorRole()
+        self.reward_role = RewardActorRole(build_reward_backend(launch_config.reward))
         self.trainer_ranks = {
             assignment.rank: TrainerRankRole(
                 rank=assignment.rank,

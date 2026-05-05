@@ -18,7 +18,7 @@ from nano_rl.runtime.slot import GpuLease, GpuLeaseManagerCore, RoleName
 
 
 def _lease_manager() -> GpuLeaseManagerCore:
-    config = load_launch_config("docs/examples/disaggregated.yaml")
+    config = load_launch_config("recipes/disaggregated.yaml")
     return GpuLeaseManagerCore(config.gpu_plan)
 
 

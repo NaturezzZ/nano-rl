@@ -261,11 +261,29 @@ def build_rollout_backend(
     config: VllmBackendConfig | Mapping[str, Any] | None = None,
     *,
     engine_factory: EngineFactory | None = None,
-) -> VllmRolloutBackend:
+) -> RolloutBackend:
     """Factory hook for future Ray role actors."""
+
+    if _backend_name(config) == "mock":
+        from nano_rl.runtime.backends.mock_rollout_backend import MockRolloutBackend, MockRolloutBackendConfig
+
+        resolved = (
+            config
+            if isinstance(config, MockRolloutBackendConfig)
+            else MockRolloutBackendConfig.from_rollout_backend_config(config if isinstance(config, Mapping) else {})
+        )
+        return MockRolloutBackend(resolved)
 
     resolved = config if isinstance(config, VllmBackendConfig) else VllmBackendConfig.model_validate(config or {})
     return VllmRolloutBackend(resolved, engine_factory=engine_factory)
+
+
+def _backend_name(config: VllmBackendConfig | Mapping[str, Any] | None) -> str:
+    if isinstance(config, Mapping):
+        return str(config.get("backend", "vllm"))
+    if config is not None and type(config).__name__ == "MockRolloutBackendConfig":
+        return "mock"
+    return "vllm"
 
 
 def _lease_sequence(lease: GpuLease | Sequence[GpuLease]) -> tuple[GpuLease, ...]:

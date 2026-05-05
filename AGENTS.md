@@ -31,8 +31,8 @@ Canonical documents:
   SVG component and rollout-flow diagrams; update it with architecture changes.
 - `docs/architecture/mode-fsm.md`: operating mode state machine.
 - `docs/protocols/*.yaml`: draft protocol/config schemas.
-- `docs/examples/collocated.yaml`: collocated runtime config.
-- `docs/examples/disaggregated.yaml`: disaggregated runtime config.
+- `recipes/collocated.yaml`: collocated runtime config.
+- `recipes/disaggregated.yaml`: disaggregated runtime config.
 - `nano_rl/`: runtime skeleton with config models, resolved GPU plan, lease
   manager, queue, registry, coordinators, metrics, backend adapters,
   residency/offload state machine, and Ray wrapper/launcher boundaries.
@@ -111,13 +111,14 @@ Canonical documents:
 ## Implementation Guidance
 
 - Before implementing or changing architecture, write the design update into
-  `plan-design.md` and, when relevant, the schemas/examples under `docs/`.
+  `plan-design.md` and, when relevant, `docs/protocols/` schemas and
+  `recipes/` runtime configs.
 - Keep `docs/architecture/design.html` synchronized with architecture changes
   that affect components, Ray actors, GPU leases, runtime flows, schemas, or
   examples.
 - When the user accepts a design direction with wording such as "不错，就这样干",
   update `plan-design.md`, `docs/architecture/design.html`, and relevant
-  schemas/examples in the same pass; do not wait for a separate reminder.
+  schemas/recipes in the same pass; do not wait for a separate reminder.
 - Keep `main.py` thin: locate/read the YAML config, validate, normalize, emit the
   resolved config when requested, and hand off to the Ray driver. Do not put the
   training loop directly in `main.py`.
@@ -144,6 +145,17 @@ Canonical documents:
 - Add narrow tests with new code. For protocol changes, include schema or model
   validation tests.
 - Do not introduce Kubernetes, Slurm, SSH, or multi-node Ray launchers in v0.1.
+
+## Python Environment
+
+- In this repository, use `/Users/bytedance/.venv/bin/python3` as the Python
+  interpreter for Python commands, tests, scripts, and validation.
+- Prefer commands such as `/Users/bytedance/.venv/bin/python3 -m pytest ...`
+  and `/Users/bytedance/.venv/bin/python3 main.py ...` rather than relying on
+  the system Python.
+- If an interactive shell already resolves `python3` to
+  `/Users/bytedance/.venv/bin/python3`, using `python3` is acceptable after
+  confirming it with `which python3`.
 
 ## Validation Expectations
 

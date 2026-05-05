@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_rollout_manager_dispatches_round_robin_and_can_pause() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     manager = RolloutManagerCore(config.gpu_plan.rollout_replicas)
 
     requests = manager.dispatch_prompts(["a", "b", "c"], target_policy_version=2, controller_step=10)
@@ -31,7 +31,7 @@ def test_rollout_manager_dispatches_round_robin_and_can_pause() -> None:
 
 
 def test_rollout_manager_pumps_backlog_until_capacity_or_backpressure() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     manager = RolloutManagerCore(config.gpu_plan.rollout_replicas, max_in_flight_per_replica=1)
     manager.enqueue_prompts(["a", "b", "c", "d", "e"])
 
@@ -70,7 +70,7 @@ def test_rollout_manager_pumps_backlog_until_capacity_or_backpressure() -> None:
 
 
 def test_trainer_coordinator_assigns_shared_gpus_and_reserves_batch() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     coordinator = TrainerCoordinatorCore(config.gpu_plan.trainer_ranks)
     assert coordinator.world_size == 4
     assert [assignment.gpu_id for assignment in coordinator.rank_assignments] == [4, 5, 6, 7]

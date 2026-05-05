@@ -18,7 +18,7 @@ def _load_yaml(path: str) -> dict:
 
 
 def test_collocated_example_resolves_to_shared_gpu_plan() -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
 
     assert config.canonical_mode == CanonicalMode.FULLY_SYNC
     assert config.model.model_path == "/mnt/hdfs/nano-ai/models/qwen"
@@ -33,7 +33,7 @@ def test_collocated_example_resolves_to_shared_gpu_plan() -> None:
 
 
 def test_disaggregated_example_resolves_rollout_only_and_shared_gpu_plan() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
 
     assert config.canonical_mode == CanonicalMode.STANDALONE_HYBRID
     assert config.rollout.partial_rollout.enabled is True
@@ -51,7 +51,7 @@ def test_disaggregated_example_resolves_rollout_only_and_shared_gpu_plan() -> No
 
 
 def test_model_path_does_not_require_storage_source_type() -> None:
-    raw = _load_yaml("docs/examples/collocated.yaml")
+    raw = _load_yaml("recipes/collocated.yaml")
     raw = copy.deepcopy(raw)
     raw["model"] = {"model_path": "/opt/nano-models/qwen"}
     temp = ROOT / ".tmp-local-model-path.yaml"
@@ -66,7 +66,7 @@ def test_model_path_does_not_require_storage_source_type() -> None:
 
 
 def test_shared_gpus_require_trainer_rank_class() -> None:
-    raw = _load_yaml("docs/examples/disaggregated.yaml")
+    raw = _load_yaml("recipes/disaggregated.yaml")
     raw["runtime"]["ray"]["gpu_manager"]["role_classes"].pop("trainer_rank")
     temp = ROOT / ".tmp-invalid-config.yaml"
     temp.write_text(yaml.safe_dump(raw))
@@ -78,7 +78,7 @@ def test_shared_gpus_require_trainer_rank_class() -> None:
 
 
 def test_internal_modes_are_not_user_yaml_modes() -> None:
-    raw = _load_yaml("docs/examples/collocated.yaml")
+    raw = _load_yaml("recipes/collocated.yaml")
     raw["mode"] = "fully_sync"
     temp = ROOT / ".tmp-invalid-mode.yaml"
     temp.write_text(yaml.safe_dump(raw))
@@ -90,7 +90,7 @@ def test_internal_modes_are_not_user_yaml_modes() -> None:
 
 
 def test_topology_counts_must_match_placement() -> None:
-    raw = _load_yaml("docs/examples/disaggregated.yaml")
+    raw = _load_yaml("recipes/disaggregated.yaml")
     raw = copy.deepcopy(raw)
     raw["runtime"]["ray"]["placement"]["trainer"]["num_ranks"] = 8
     temp = ROOT / ".tmp-invalid-placement.yaml"
@@ -103,7 +103,7 @@ def test_topology_counts_must_match_placement() -> None:
 
 
 def test_role_class_paths_must_import() -> None:
-    raw = _load_yaml("docs/examples/collocated.yaml")
+    raw = _load_yaml("recipes/collocated.yaml")
     raw["runtime"]["ray"]["gpu_manager"]["role_classes"]["rollout_worker"] = "nano_rl.runtime.roles.MissingRole"
     temp = ROOT / ".tmp-invalid-role-class.yaml"
     temp.write_text(yaml.safe_dump(raw))
@@ -115,7 +115,7 @@ def test_role_class_paths_must_import() -> None:
 
 
 def test_gpu_manager_must_be_enabled() -> None:
-    raw = _load_yaml("docs/examples/collocated.yaml")
+    raw = _load_yaml("recipes/collocated.yaml")
     raw = copy.deepcopy(raw)
     raw["runtime"]["ray"]["gpu_manager"]["enabled"] = False
     temp = ROOT / ".tmp-disabled-gpu-manager.yaml"
@@ -128,7 +128,7 @@ def test_gpu_manager_must_be_enabled() -> None:
 
 
 def test_rollout_lifecycle_regions_must_align_with_tensor_parallel_groups() -> None:
-    raw = _load_yaml("docs/examples/disaggregated.yaml")
+    raw = _load_yaml("recipes/disaggregated.yaml")
     raw = copy.deepcopy(raw)
     raw["runtime"]["ray"]["gpu_manager"]["topology"]["rollout_only_gpus"] = 3
     raw["runtime"]["ray"]["gpu_manager"]["topology"]["shared_gpus"] = 5

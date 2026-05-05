@@ -8,7 +8,7 @@ from nano_rl.runtime.slot import GpuLeaseManagerCore, RoleName
 
 
 def test_rollout_only_gpu_cannot_grant_trainer_lease() -> None:
-    config = load_launch_config("docs/examples/disaggregated.yaml")
+    config = load_launch_config("recipes/disaggregated.yaml")
     manager = GpuLeaseManagerCore(config.gpu_plan)
 
     with pytest.raises(GpuRoleUnsupported):
@@ -20,7 +20,7 @@ def test_rollout_only_gpu_cannot_grant_trainer_lease() -> None:
 
 
 def test_shared_gpu_toggles_between_rollout_and_trainer_leases() -> None:
-    config = load_launch_config("docs/examples/disaggregated.yaml")
+    config = load_launch_config("recipes/disaggregated.yaml")
     manager = GpuLeaseManagerCore(config.gpu_plan)
 
     train_lease = manager.grant(RoleName.TRAINER, 4, "trainer-rank-0", reason="train_window")
@@ -33,7 +33,7 @@ def test_shared_gpu_toggles_between_rollout_and_trainer_leases() -> None:
 
 
 def test_assert_active_rejects_wrong_lease_epoch() -> None:
-    config = load_launch_config("docs/examples/disaggregated.yaml")
+    config = load_launch_config("recipes/disaggregated.yaml")
     manager = GpuLeaseManagerCore(config.gpu_plan)
 
     manager.grant(RoleName.TRAINER, 4, "trainer-rank-0")

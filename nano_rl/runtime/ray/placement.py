@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nano_rl.config import LaunchConfig
+from nano_rl.config import LaunchConfig, TrainerBackendName
 
 
 class RayActorSpec(BaseModel):
@@ -38,6 +38,7 @@ class RayLaunchPlan(BaseModel):
 
     node_custom_resources: dict[str, float]
     actors: tuple[RayActorSpec, ...]
+    backend_summary: dict[str, str] = Field(default_factory=dict)
 
     @property
     def actors_requesting_ray_gpus(self) -> tuple[RayActorSpec, ...]:
@@ -116,12 +117,20 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                     list(replica.gpu_ids),
                     list(replica.worker_ids),
                     {
+                        "backend": config.rollout.backend,
                         "model_path": config.model.model_path,
                         "tokenizer_path": config.model.tokenizer_path,
                         "tensor_parallel_size": len(replica.gpu_ids),
+                        "dtype": config.rollout.vllm.dtype,
+                        "max_model_len": config.rollout.vllm.max_model_len,
+                        "trust_remote_code": config.rollout.vllm.trust_remote_code,
+                        "engine_kwargs": config.rollout.vllm.engine_kwargs,
+                        "sampling_params": config.rollout.vllm.sampling_params,
                         "gpu_ids": list(replica.gpu_ids),
                         "holder_ids": list(replica.worker_ids),
+                        "mock": config.rollout.mock.model_dump(mode="json"),
                     },
+                    config.reward.model_dump(mode="json"),
                 ),
                 metadata={
                     "replica_id": replica.replica_id,
@@ -129,6 +138,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                     "topology": replica.topology,
                     "gpu_ids": list(replica.gpu_ids),
                     "worker_ids": list(replica.worker_ids),
+                    "backend": config.rollout.backend,
                     "weight_transfer_method": config.weight_transfer.method,
                 },
             )
@@ -176,19 +186,43 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "group_epoch": 0,
                         "model_path": config.model.model_path,
                         "checkpoint_dir": config.trainer.checkpoint_dir,
-                        "extra": {
-                            "learning_rate": config.algorithm.learning_rate,
-                            "mixed_precision": config.trainer.fsdp2.mixed_precision,
-                            "sharding": config.trainer.fsdp2.sharding,
-                        },
+                        "extra": _trainer_backend_extra(config),
                     },
                 ),
-                metadata={"rank": rank.rank, "gpu_id": rank.gpu_id},
+                metadata={"rank": rank.rank, "gpu_id": rank.gpu_id, "backend": config.trainer.backend},
             )
         )
 
     _validate_role_resource_uniqueness(actors)
-    return RayLaunchPlan(node_custom_resources=node_custom_resources, actors=tuple(actors))
+    return RayLaunchPlan(
+        node_custom_resources=node_custom_resources,
+        actors=tuple(actors),
+        backend_summary={
+            "rollout": config.rollout.backend,
+            "trainer": config.trainer.backend,
+            "weight_store": config.weight_transfer.store.backend,
+            "data": config.data.source_type,
+            "reward": config.reward.backend,
+        },
+    )
+
+
+def _trainer_backend_extra(config: LaunchConfig) -> dict[str, Any]:
+    extra: dict[str, Any] = {"learning_rate": config.algorithm.learning_rate}
+    if config.trainer.backend == TrainerBackendName.FSDP2:
+        if config.trainer.fsdp2 is None:
+            raise ValueError("trainer.fsdp2 is required when trainer.backend=fsdp2")
+        extra.update(
+            {
+                "mixed_precision": config.trainer.fsdp2.mixed_precision,
+                "sharding": config.trainer.fsdp2.sharding,
+            }
+        )
+    elif config.trainer.backend == TrainerBackendName.MOCK:
+        extra["mock"] = config.trainer.mock.model_dump(mode="json")
+        if str(config.weight_transfer.store.backend) != "checkpoint":
+            extra["weight_store"] = config.weight_transfer.store.model_dump(mode="json")
+    return extra
 
 
 def _validate_role_resource_uniqueness(actors: list[RayActorSpec]) -> None:

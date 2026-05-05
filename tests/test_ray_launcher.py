@@ -76,7 +76,7 @@ def _fake_builders(
 
 
 def test_actor_graph_launcher_uses_zero_ray_gpus_and_role_resources() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     plan = build_ray_launch_plan(config)
     calls: list[dict[str, Any]] = []
 
@@ -105,7 +105,7 @@ def test_actor_graph_launcher_uses_zero_ray_gpus_and_role_resources() -> None:
 
 
 def test_actor_graph_launcher_passes_init_args_from_launch_plan() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     plan = build_ray_launch_plan(config)
     calls: list[dict[str, Any]] = []
 
@@ -144,7 +144,7 @@ def test_actor_graph_launcher_passes_init_args_from_launch_plan() -> None:
 
 
 def test_actor_graph_dry_run_does_not_create_remote_actors() -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
     plan = build_ray_launch_plan(config)
     calls: list[dict[str, Any]] = []
 
@@ -210,7 +210,7 @@ def test_ray_cluster_controller_explicit_address_fails_without_local_fallback() 
 
 
 def test_actor_graph_launcher_records_auto_fallback_cluster_startup() -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
     plan = build_ray_launch_plan(config)
     calls: list[dict[str, Any]] = []
     ray = FakeRayModule(fail_auto_connect=True)
@@ -231,7 +231,7 @@ def test_actor_graph_launcher_records_auto_fallback_cluster_startup() -> None:
 
 
 def test_ray_driver_train_still_returns_plan_without_starting_actor_graph(monkeypatch) -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
 
     def fail_if_actor_graph_starts(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("train() must not start the Ray actor graph by default")
@@ -250,7 +250,7 @@ def test_ray_driver_train_still_returns_plan_without_starting_actor_graph(monkey
 
 
 def test_ray_driver_train_can_start_actor_graph_when_config_requests_it() -> None:
-    base_config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    base_config = load_launch_config(ROOT / "recipes/collocated.yaml")
     config = base_config.model_copy(
         update={"run": base_config.run.model_copy(update={"start_ray_actors": True})}
     )

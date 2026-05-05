@@ -3,6 +3,34 @@ title: NanoRLRuntimeConfig
 type: object
 required: [run, runtime, mode, parallel, model, data, algorithm, trainer, rollout, control]
 properties:
+  mock:
+    type: object
+    description: Optional global defaults for deterministic high-level mock modules.
+    properties:
+      enabled: { type: boolean, default: false }
+      seed: { type: integer, minimum: 0, default: 0 }
+      strict:
+        type: object
+        properties:
+          leases: { type: boolean, default: true }
+          versions: { type: boolean, default: true }
+          no_gpu_imports: { type: boolean, default: true }
+          no_external_data_probe: { type: boolean, default: true }
+      timing:
+        type: object
+        properties:
+          rollout_sleep_ms: { type: integer, minimum: 0, default: 0 }
+          trainer_sleep_ms: { type: integer, minimum: 0, default: 0 }
+          weight_io_sleep_ms: { type: integer, minimum: 0, default: 0 }
+      failure_injection:
+        type: object
+        properties:
+          enabled: { type: boolean, default: false }
+          fail_after_rollout_requests: { type: [integer, "null"], minimum: 1 }
+          fail_on_train_step: { type: [integer, "null"], minimum: 1 }
+          fail_weight_version: { type: [integer, "null"], minimum: 0 }
+          corrupt_weight_checksum: { type: boolean, default: false }
+          stale_lease_epoch_delta: { type: integer, minimum: 0, default: 0 }
   run:
     type: object
     required: [intent]
@@ -39,7 +67,7 @@ properties:
             uniqueItems: true
             items:
               type: string
-              enum: [hdfs_uri, hdfs_fuse_path]
+              enum: [hdfs_uri, hdfs_fuse_path, mock_inline, mock_generated, mock_jsonl]
           hdfs:
             type: object
             required: [cli]
@@ -180,13 +208,36 @@ properties:
       tokenizer_path: { type: string, minLength: 1 }
   data:
     type: object
-    required: [source_type, data_path]
+    required: [source_type]
     properties:
       source_type:
         type: string
-        enum: [hdfs_uri, hdfs_fuse_path]
+        enum: [hdfs_uri, hdfs_fuse_path, mock_inline, mock_generated, mock_jsonl]
       data_path: { type: string, minLength: 1 }
       prompt_column: { type: string, minLength: 1 }
+      mock_inline:
+        type: object
+        properties:
+          prompts:
+            type: array
+            items: { type: string }
+          repeat: { type: integer, minimum: 1, default: 1 }
+      mock_generated:
+        type: object
+        required: [count]
+        properties:
+          count: { type: integer, minimum: 1 }
+          template: { type: string, default: "prompt-{index}" }
+          start_index: { type: integer, minimum: 0, default: 0 }
+          shuffle:
+            anyOf:
+              - type: boolean
+              - type: string
+                enum: ["false", deterministic]
+      mock_jsonl:
+        type: object
+        properties:
+          encoding: { type: string, default: utf-8 }
     allOf:
       - if:
           properties:
@@ -212,12 +263,12 @@ properties:
       seed: { type: integer, minimum: 0 }
   trainer:
     type: object
-    required: [backend, global_batch_size, fsdp2]
+    required: [backend, global_batch_size]
     description: Trainer runtime configuration. Real FSDP2 weight export needs a checkpoint_dir and multi-rank execution also needs process-group rendezvous metadata from the actor runtime.
     properties:
       backend:
         type: string
-        enum: [fsdp2]
+        enum: [fsdp2, mock, fake]
       global_batch_size:
         type: integer
         minimum: 1
@@ -235,13 +286,41 @@ properties:
           sharding:
             type: string
             enum: [full_shard, hybrid_shard]
+      mock:
+        type: object
+        properties:
+          initial_loss: { type: number, exclusiveMinimum: 0, default: 1.0 }
+          loss_decay: { type: string, enum: [reciprocal, constant], default: reciprocal }
+          export_format: { type: string, enum: [vllm_compatible, hf, safetensors], default: vllm_compatible }
+          optimizer_state: { type: string, enum: [tracked, stateless], default: tracked }
+          require_rank0_export: { type: boolean, default: true }
+          seed: { type: integer, minimum: 0, default: 0 }
+          num_parameters: { type: integer, minimum: 0, default: 1024 }
   rollout:
     type: object
     required: [backend]
     properties:
       backend:
         type: string
-        enum: [vllm]
+        enum: [vllm, mock]
+      vllm:
+        type: object
+        properties:
+          dtype: { type: [string, "null"] }
+          max_model_len: { type: [integer, "null"], minimum: 1 }
+          trust_remote_code: { type: boolean, default: false }
+          engine_kwargs: { type: object }
+          sampling_params: { type: object }
+      mock:
+        type: object
+        properties:
+          response_template: { type: string, default: "{prompt} :: response@v{policy_version}" }
+          tokenization: { type: string, enum: [sha256_bytes, whitespace_hash], default: sha256_bytes }
+          max_response_tokens: { type: integer, minimum: 1, default: 16 }
+          logprob_mode: { type: string, enum: [linear, constant], default: linear }
+          finish_reason: { type: string, default: stop }
+          include_policy_segments: { type: boolean, default: false }
+          seed: { type: integer, minimum: 0, default: 0 }
       partial_rollout:
         type: object
         required: [enabled, pause_mode, clear_cache, mixed_policy_samples]
@@ -292,6 +371,32 @@ properties:
         type: integer
         minimum: 1
         default: 2
+      store:
+        type: object
+        properties:
+          backend:
+            type: string
+            enum: [checkpoint, mock_memory, mock_filesystem]
+            default: checkpoint
+          manifest_dir:
+            type: [string, "null"]
+          checksum_mode:
+            type: string
+            enum: [semantic_sha256]
+            default: semantic_sha256
+  reward:
+    type: object
+    properties:
+      backend:
+        type: string
+        enum: [mock]
+        default: mock
+      mock:
+        type: object
+        properties:
+          name: { type: string, default: deterministic_length_reward }
+          scale: { type: number, exclusiveMinimum: 0, default: 100.0 }
+          cap: { type: number, exclusiveMinimum: 0, default: 1.0 }
   control:
     type: object
     required: [max_policy_lag, sample_ttl_sec, queue_high_watermark, max_pending_rollout_refs, max_pending_train_refs]

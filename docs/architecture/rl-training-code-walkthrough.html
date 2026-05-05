@@ -483,7 +483,7 @@
 
         <section class="panel" id="config">
           <h2>从 YAML 到 LaunchConfig</h2>
-          <p>用户启动路径是 YAML-first：训练参数、拓扑、role class、并行维度都在 <a href="../../docs/examples/disaggregated.yaml"><code>docs/examples/disaggregated.yaml</code></a> 或 <a href="../../docs/examples/collocated.yaml"><code>docs/examples/collocated.yaml</code></a> 中描述，CLI 不提供逐字段覆盖。</p>
+          <p>用户启动路径是 YAML-first：训练参数、拓扑、role class、并行维度都在 <a href="../../recipes/disaggregated.yaml"><code>recipes/disaggregated.yaml</code></a> 或 <a href="../../recipes/collocated.yaml"><code>recipes/collocated.yaml</code></a> 中描述，CLI 不提供逐字段覆盖。</p>
           <div class="flow-list">
             <div class="flow-step"><strong><code>main.py</code> 读取配置。</strong> <code>load_launch_config(args.config)</code> 先用 <code>yaml.safe_load</code> 读 YAML，再用 <code>RuntimeConfig.model_validate</code> 做结构化校验。</div>
             <div class="flow-step"><strong>用户模式归一化。</strong> 用户只写 <code>collocated</code> 或 <code>disaggregated</code>；内部 canonical mode 分别是 <code>fully_sync</code> 和 <code>standalone_hybrid</code>。</div>
@@ -940,7 +940,7 @@ TRAINER_ACTIVE
         <section class="panel" id="reading">
           <h2>建议阅读顺序</h2>
           <ol>
-            <li>先读 <a href="../../docs/examples/disaggregated.yaml"><code>docs/examples/disaggregated.yaml</code></a>，建立一台 8 GPU 机器上的 rollout-only/shared 拓扑直觉。</li>
+            <li>先读 <a href="../../recipes/disaggregated.yaml"><code>recipes/disaggregated.yaml</code></a>，建立一台 8 GPU 机器上的 rollout-only/shared 拓扑直觉。</li>
             <li>读 <a href="../../nano_rl/config.py"><code>nano_rl/config.py</code></a> 的 <code>RuntimeConfig._validate_cross_fields()</code> 和 <code>_build_gpu_plan()</code>，看数量如何展开成具体 GPU plan。</li>
             <li>读 <a href="../../nano_rl/runtime/slot.py"><code>slot.py</code></a> 和 <a href="../../nano_rl/runtime/offload.py"><code>offload.py</code></a>，理解共享 GPU 不是靠 Ray GPU token，而是靠 custom resource + lease + residency state。</li>
             <li>读 <a href="../../nano_rl/runtime/ray/placement.py"><code>ray/placement.py</code></a> 和 <a href="../../nano_rl/runtime/ray/actors.py"><code>ray/actors.py</code></a>，看 backend config 如何进入 rollout replica actor 和 trainer rank actor。</li>

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_controller_dry_run_plan_counts_gpus() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     plan = ControllerCore(config).dry_run()
 
     assert plan["canonical_mode"] == "standalone_hybrid"
@@ -32,7 +32,7 @@ def test_controller_dry_run_plan_counts_gpus() -> None:
 
 
 def test_cli_emit_resolved_config_exits_without_artifact_validation(capsys) -> None:
-    code = main(["--config", str(ROOT / "docs/examples/collocated.yaml"), "--emit-resolved-config"])
+    code = main(["--config", str(ROOT / "recipes/collocated.yaml"), "--emit-resolved-config"])
     captured = capsys.readouterr()
 
     assert code == 0
@@ -42,7 +42,7 @@ def test_cli_emit_resolved_config_exits_without_artifact_validation(capsys) -> N
 
 
 def test_cli_train_skip_artifact_validation_outputs_single_runtime_plan(capsys) -> None:
-    raw = yaml.safe_load((ROOT / "docs/examples/disaggregated.yaml").read_text())
+    raw = yaml.safe_load((ROOT / "recipes/disaggregated.yaml").read_text())
     raw["run"]["emit_resolved_config"] = False
     temp = ROOT / ".tmp-cli-train-skip.yaml"
     temp.write_text(yaml.safe_dump(raw))
@@ -61,7 +61,7 @@ def test_cli_train_skip_artifact_validation_outputs_single_runtime_plan(capsys) 
 
 
 def test_controller_smoke_iteration_composes_runtime_modules() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     result = ControllerCore(config).run_smoke_iteration(["hello", "world"])
 
     assert result["initial_weight"]["version_id"] == 0
@@ -78,7 +78,7 @@ def test_controller_smoke_iteration_composes_runtime_modules() -> None:
 
 
 def test_controller_accepts_prompt_backlog_and_pumps_rollout() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     controller = ControllerCore(config)
     weight = controller.bootstrap_initial_weight()
 
@@ -92,7 +92,7 @@ def test_controller_accepts_prompt_backlog_and_pumps_rollout() -> None:
 
 
 def test_controller_train_window_updates_residency_state_machine() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     controller = ControllerCore(config)
 
     train_states = controller.enter_train_window()
@@ -113,7 +113,7 @@ def test_controller_train_window_updates_residency_state_machine() -> None:
 
 
 def test_controller_pumps_rollout_until_budget_is_exhausted() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     controller = ControllerCore(config)
     weight = controller.bootstrap_initial_weight()
     controller.submit_prompts([f"prompt-{index}" for index in range(150)])
@@ -126,7 +126,7 @@ def test_controller_pumps_rollout_until_budget_is_exhausted() -> None:
 
 
 def test_controller_rejects_rollout_activation_during_train_window() -> None:
-    config = load_launch_config(ROOT / "docs/examples/collocated.yaml")
+    config = load_launch_config(ROOT / "recipes/collocated.yaml")
     controller = ControllerCore(config)
     active = controller.bootstrap_initial_weight()
     controller.enter_train_window()
@@ -142,7 +142,7 @@ def test_controller_rejects_rollout_activation_during_train_window() -> None:
 
 
 def test_controller_releases_batch_and_returns_to_rollout_on_train_failure() -> None:
-    config = load_launch_config(ROOT / "docs/examples/disaggregated.yaml")
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     controller = ControllerCore(config)
 
     def fail_optimize(*args: object, **kwargs: object) -> object:

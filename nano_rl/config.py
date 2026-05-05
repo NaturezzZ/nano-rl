@@ -45,12 +45,66 @@ class CanonicalMode(StrEnum):
 class SourceType(StrEnum):
     HDFS_URI = "hdfs_uri"
     HDFS_FUSE_PATH = "hdfs_fuse_path"
+    MOCK_INLINE = "mock_inline"
+    MOCK_GENERATED = "mock_generated"
+    MOCK_JSONL = "mock_jsonl"
+
+
+class TrainerBackendName(StrEnum):
+    FSDP2 = "fsdp2"
+    MOCK = "mock"
+    FAKE = "fake"
+
+
+class RolloutBackendName(StrEnum):
+    VLLM = "vllm"
+    MOCK = "mock"
+
+
+class WeightStoreBackendName(StrEnum):
+    CHECKPOINT = "checkpoint"
+    MOCK_MEMORY = "mock_memory"
+    MOCK_FILESYSTEM = "mock_filesystem"
+
+
+class RewardBackendName(StrEnum):
+    MOCK = "mock"
 
 
 class RunConfig(BaseModel):
     intent: RunIntent
     emit_resolved_config: bool = False
     start_ray_actors: bool = False
+
+
+class MockStrictConfig(BaseModel):
+    leases: bool = True
+    versions: bool = True
+    no_gpu_imports: bool = True
+    no_external_data_probe: bool = True
+
+
+class MockTimingConfig(BaseModel):
+    rollout_sleep_ms: int = Field(default=0, ge=0)
+    trainer_sleep_ms: int = Field(default=0, ge=0)
+    weight_io_sleep_ms: int = Field(default=0, ge=0)
+
+
+class MockFailureInjectionConfig(BaseModel):
+    enabled: bool = False
+    fail_after_rollout_requests: int | None = Field(default=None, ge=1)
+    fail_on_train_step: int | None = Field(default=None, ge=1)
+    fail_weight_version: int | None = Field(default=None, ge=0)
+    corrupt_weight_checksum: bool = False
+    stale_lease_epoch_delta: int = Field(default=0, ge=0)
+
+
+class MockConfig(BaseModel):
+    enabled: bool = False
+    seed: int = Field(default=0, ge=0)
+    strict: MockStrictConfig = Field(default_factory=MockStrictConfig)
+    timing: MockTimingConfig = Field(default_factory=MockTimingConfig)
+    failure_injection: MockFailureInjectionConfig = Field(default_factory=MockFailureInjectionConfig)
 
 
 class LocalRuntimeConfig(BaseModel):
@@ -198,10 +252,45 @@ class ModelConfig(BaseModel):
         return self
 
 
+class MockInlineDataConfig(BaseModel):
+    prompts: list[str] = Field(default_factory=list)
+    repeat: int = Field(default=1, ge=1)
+
+
+class MockGeneratedDataConfig(BaseModel):
+    count: int = Field(ge=1)
+    template: str = "prompt-{index}"
+    start_index: int = Field(default=0, ge=0)
+    shuffle: Literal["false", "deterministic"] | bool = False
+
+
+class MockJsonlDataConfig(BaseModel):
+    encoding: str = "utf-8"
+
+
 class DataConfig(BaseModel):
     source_type: SourceType
-    data_path: str
+    data_path: str | None = None
     prompt_column: str = "prompt"
+    mock_inline: MockInlineDataConfig | None = None
+    mock_generated: MockGeneratedDataConfig | None = None
+    mock_jsonl: MockJsonlDataConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_source_fields(self) -> "DataConfig":
+        if self.source_type in {SourceType.HDFS_URI, SourceType.HDFS_FUSE_PATH, SourceType.MOCK_JSONL}:
+            if not self.data_path:
+                raise ValueError(f"data_path is required when source_type={self.source_type}")
+        if self.source_type == SourceType.MOCK_INLINE:
+            if self.mock_inline is None:
+                self.mock_inline = MockInlineDataConfig()
+            if not self.mock_inline.prompts:
+                raise ValueError("data.mock_inline.prompts must not be empty when source_type=mock_inline")
+        if self.source_type == SourceType.MOCK_GENERATED and self.mock_generated is None:
+            raise ValueError("data.mock_generated is required when source_type=mock_generated")
+        if self.source_type == SourceType.MOCK_JSONL and self.mock_jsonl is None:
+            self.mock_jsonl = MockJsonlDataConfig()
+        return self
 
 
 class AlgorithmConfig(BaseModel):
@@ -216,11 +305,30 @@ class Fsdp2Config(BaseModel):
     sharding: Literal["full_shard", "hybrid_shard"]
 
 
+class MockTrainerConfig(BaseModel):
+    initial_loss: float = Field(default=1.0, gt=0)
+    loss_decay: Literal["reciprocal", "constant"] = "reciprocal"
+    export_format: Literal["vllm_compatible", "hf", "safetensors"] = "vllm_compatible"
+    optimizer_state: Literal["tracked", "stateless"] = "tracked"
+    require_rank0_export: bool = True
+    seed: int = Field(default=0, ge=0)
+    num_parameters: int = Field(default=1024, ge=0)
+
+
 class TrainerConfig(BaseModel):
-    backend: Literal["fsdp2"]
+    backend: TrainerBackendName
     global_batch_size: int = Field(ge=1)
     checkpoint_dir: str | None = None
-    fsdp2: Fsdp2Config
+    fsdp2: Fsdp2Config | None = None
+    mock: MockTrainerConfig = Field(default_factory=MockTrainerConfig)
+
+    @model_validator(mode="after")
+    def _validate_backend_section(self) -> "TrainerConfig":
+        if self.backend == TrainerBackendName.FSDP2 and self.fsdp2 is None:
+            raise ValueError("trainer.fsdp2 is required when trainer.backend=fsdp2")
+        if self.backend == TrainerBackendName.FAKE:
+            self.backend = TrainerBackendName.MOCK
+        return self
 
 
 class PolicyPinConfig(BaseModel):
@@ -246,8 +354,28 @@ class PartialRolloutConfig(BaseModel):
     mixed_policy_samples: Literal["train", "drop"] = "drop"
 
 
+class VllmRolloutConfig(BaseModel):
+    dtype: str | None = None
+    max_model_len: int | None = Field(default=None, ge=1)
+    trust_remote_code: bool = False
+    engine_kwargs: dict[str, Any] = Field(default_factory=dict)
+    sampling_params: dict[str, Any] = Field(default_factory=dict)
+
+
+class MockRolloutConfig(BaseModel):
+    response_template: str = "{prompt} :: response@v{policy_version}"
+    tokenization: Literal["sha256_bytes", "whitespace_hash"] = "sha256_bytes"
+    max_response_tokens: int = Field(default=16, ge=1)
+    logprob_mode: Literal["linear", "constant"] = "linear"
+    finish_reason: str = "stop"
+    include_policy_segments: bool = False
+    seed: int = Field(default=0, ge=0)
+
+
 class RolloutConfig(BaseModel):
-    backend: Literal["vllm"]
+    backend: RolloutBackendName
+    vllm: VllmRolloutConfig = Field(default_factory=VllmRolloutConfig)
+    mock: MockRolloutConfig = Field(default_factory=MockRolloutConfig)
     partial_rollout: PartialRolloutConfig = Field(default_factory=PartialRolloutConfig)
     hybrid: RolloutHybridConfig = Field(default_factory=RolloutHybridConfig)
 
@@ -264,6 +392,24 @@ class WeightTransferConfig(BaseModel):
     method: WeightTransferMethod = WeightTransferMethod.LOCALITY_AWARE_CHECKPOINT
     allow_rollout_only_artifact_pull: bool = True
     max_versions_in_flight: int = Field(default=2, ge=1)
+    store: "WeightStoreConfig" = Field(default_factory=lambda: WeightStoreConfig())
+
+
+class WeightStoreConfig(BaseModel):
+    backend: WeightStoreBackendName = WeightStoreBackendName.CHECKPOINT
+    manifest_dir: str | None = None
+    checksum_mode: Literal["semantic_sha256"] = "semantic_sha256"
+
+
+class MockRewardConfig(BaseModel):
+    name: str = "deterministic_length_reward"
+    scale: float = Field(default=100.0, gt=0)
+    cap: float = Field(default=1.0, gt=0)
+
+
+class RewardConfig(BaseModel):
+    backend: RewardBackendName = RewardBackendName.MOCK
+    mock: MockRewardConfig = Field(default_factory=MockRewardConfig)
 
 
 class RuntimeConfig(BaseModel):
@@ -272,6 +418,7 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run: RunConfig
+    mock: MockConfig = Field(default_factory=MockConfig)
     runtime: RuntimeSection
     mode: UserMode
     parallel: ParallelConfig
@@ -280,6 +427,7 @@ class RuntimeConfig(BaseModel):
     algorithm: AlgorithmConfig
     trainer: TrainerConfig
     rollout: RolloutConfig
+    reward: RewardConfig = Field(default_factory=RewardConfig)
     weight_transfer: WeightTransferConfig = Field(default_factory=WeightTransferConfig)
     control: ControlConfig
 
@@ -379,6 +527,18 @@ class RuntimeConfig(BaseModel):
         if self.data.source_type not in self.runtime.storage.allowed_input_sources:
             raise ValueError("data.source_type must be listed in allowed_input_sources")
 
+        if (
+            self.run.start_ray_actors
+            and self.weight_transfer.store.backend == WeightStoreBackendName.MOCK_MEMORY
+        ):
+            raise ValueError("weight_transfer.store.backend=mock_memory cannot be used with run.start_ray_actors=true")
+
+        if (
+            self.weight_transfer.store.backend == WeightStoreBackendName.MOCK_FILESYSTEM
+            and not self.weight_transfer.store.manifest_dir
+        ):
+            raise ValueError("weight_transfer.store.manifest_dir is required when backend=mock_filesystem")
+
         _validate_source_uri("data.data_path", self.data.source_type, self.data.data_path)
         return self
 
@@ -398,6 +558,7 @@ class LaunchConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     run: RunConfig
+    mock: MockConfig
     canonical_mode: CanonicalMode
     user_mode: UserMode
     runtime: RuntimeSection
@@ -407,6 +568,7 @@ class LaunchConfig(BaseModel):
     algorithm: AlgorithmConfig
     trainer: TrainerConfig
     rollout: RolloutConfig
+    reward: RewardConfig
     weight_transfer: WeightTransferConfig
     control: ControlConfig
     gpu_plan: ResolvedGpuPlan
@@ -415,6 +577,7 @@ class LaunchConfig(BaseModel):
     def from_runtime_config(cls, config: RuntimeConfig) -> "LaunchConfig":
         return cls(
             run=config.run,
+            mock=config.mock,
             canonical_mode=config.canonical_mode,
             user_mode=config.mode,
             runtime=config.runtime,
@@ -424,6 +587,7 @@ class LaunchConfig(BaseModel):
             algorithm=config.algorithm,
             trainer=config.trainer,
             rollout=config.rollout,
+            reward=config.reward,
             weight_transfer=config.weight_transfer,
             control=config.control,
             gpu_plan=_build_gpu_plan(config),
@@ -527,13 +691,22 @@ def _build_gpu_plan(config: RuntimeConfig) -> ResolvedGpuPlan:
     )
 
 
-def _validate_source_uri(field: str, source_type: SourceType, uri: str) -> None:
+def _validate_source_uri(field: str, source_type: SourceType, uri: str | None) -> None:
     if source_type == SourceType.HDFS_URI:
+        if uri is None:
+            raise ValueError(f"{field} is required when source_type=hdfs_uri")
         if not uri.startswith("hdfs://"):
             raise ValueError(f"{field} must start with hdfs:// when source_type=hdfs_uri")
     elif source_type == SourceType.HDFS_FUSE_PATH:
+        if uri is None:
+            raise ValueError(f"{field} is required when source_type=hdfs_fuse_path")
         if not uri.startswith("/"):
             raise ValueError(f"{field} must be absolute when source_type=hdfs_fuse_path")
+    elif source_type == SourceType.MOCK_JSONL:
+        if uri is None:
+            raise ValueError(f"{field} is required when source_type=mock_jsonl")
+    elif source_type in {SourceType.MOCK_INLINE, SourceType.MOCK_GENERATED}:
+        return
     else:
         raise ValueError(f"unsupported source_type for {field}: {source_type}")
 

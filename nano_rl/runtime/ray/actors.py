@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from nano_rl.runtime.backends import (
-    TrainerBackendConfig,
-    VllmBackendConfig,
-    VllmRolloutBackend,
+    build_rollout_backend,
     build_trainer_backend,
     generation_output_to_sample_record,
 )
@@ -21,6 +19,7 @@ from nano_rl.runtime.protocols import (
     WeightMeta,
     WeightShardSource,
 )
+from nano_rl.runtime.reward_backend import build_reward_backend
 from nano_rl.runtime.roles import (
     RewardActorRole,
     RolloutReplicaControllerRole,
@@ -143,17 +142,17 @@ def build_rollout_replica_controller_actor_class():
             gpu_ids: list[int],
             worker_ids: list[str],
             backend_config: dict[str, object] | None = None,
+            reward_config: dict[str, object] | None = None,
         ):
             self._role = RolloutReplicaControllerRole(
                 replica_id=replica_id,
                 gpu_ids=tuple(gpu_ids),
                 worker_ids=tuple(worker_ids),
             )
-            self._reward = RewardActorRole()
+            self._reward = RewardActorRole(build_reward_backend(reward_config))
             self._backend = None
             if backend_config is not None:
-                resolved = VllmBackendConfig.model_validate(backend_config)
-                self._backend = VllmRolloutBackend(resolved)
+                self._backend = build_rollout_backend(backend_config)
 
         def activate_weight(
             self,
@@ -184,11 +183,11 @@ def build_rollout_replica_controller_actor_class():
                     lease=parsed_leases,
                     request_id=parsed_request.request_id,
                 )
-                reward = self._reward.score(parsed_request.prompt, output.response)
+                reward = self._reward.score_result(parsed_request.prompt, output.response)
                 sample = generation_output_to_sample_record(
                     output,
-                    reward=reward,
-                    reward_source=self._reward.name,
+                    reward=reward.reward,
+                    reward_source=reward.reward_source,
                     request_metadata=parsed_request.metadata,
                 )
                 return sample.model_dump(mode="json")
@@ -200,6 +199,8 @@ def build_rollout_replica_controller_actor_class():
             return sample.model_dump(mode="json")
 
         def state(self) -> dict[str, object]:
+            backend_active_weight = None if self._backend is None else getattr(self._backend, "active_weight", None)
+            backend_active_source = None if self._backend is None else getattr(self._backend, "active_weight_source", None)
             return {
                 "replica_id": self._role.replica_id,
                 "gpu_ids": list(self._role.gpu_ids),
@@ -211,6 +212,13 @@ def build_rollout_replica_controller_actor_class():
                     None if self._role.active_weight_source is None else self._role.active_weight_source.model_dump(mode="json")
                 ),
                 "backend": None if self._backend is None else type(self._backend).__name__,
+                "backend_active_policy_version": (
+                    None if backend_active_weight is None else backend_active_weight.version_id
+                ),
+                "backend_active_weight_checksum": None if backend_active_weight is None else backend_active_weight.checksum,
+                "backend_active_weight_source": (
+                    None if backend_active_source is None else backend_active_source.model_dump(mode="json")
+                ),
             }
 
     return RolloutReplicaControllerActor
@@ -227,14 +235,21 @@ def build_rollout_worker_actor_class():
 
     @ray.remote(num_cpus=0, num_gpus=0)
     class RolloutWorkerActor:
-        def __init__(self, worker_id: str, gpu_id: int, dp_rank: int, tp_rank: int):
+        def __init__(
+            self,
+            worker_id: str,
+            gpu_id: int,
+            dp_rank: int,
+            tp_rank: int,
+            reward_config: dict[str, object] | None = None,
+        ):
             self._role = RolloutWorkerRole(
                 worker_id=worker_id,
                 gpu_id=gpu_id,
                 dp_rank=dp_rank,
                 tp_rank=tp_rank,
             )
-            self._reward = RewardActorRole()
+            self._reward = RewardActorRole(build_reward_backend(reward_config))
 
         def activate_weight(self, meta: dict[str, object], lease: dict[str, object]) -> None:
             self._role.activate_weight(
@@ -285,8 +300,7 @@ def build_trainer_rank_actor_class():
             self._role = TrainerRankRole(rank=rank, gpu_id=gpu_id, group_epoch=group_epoch)
             self._backend = None
             if backend_config is not None:
-                resolved = TrainerBackendConfig.model_validate(backend_config)
-                self._backend = build_trainer_backend(resolved)
+                self._backend = build_trainer_backend(backend_config)
 
         def initialize_rank(self) -> dict[str, object] | None:
             if self._backend is None:

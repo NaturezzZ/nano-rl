@@ -15,7 +15,7 @@ def test_smoke_script_runs_one_local_iteration() -> None:
             sys.executable,
             "scripts/smoke_local_runtime.py",
             "--config",
-            "docs/examples/disaggregated.yaml",
+            "recipes/disaggregated.yaml",
             "--prompt",
             "hello",
         ],

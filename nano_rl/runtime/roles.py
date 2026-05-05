@@ -7,7 +7,7 @@ implementations.  Real backends can later implement the same role surface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 
@@ -21,6 +21,7 @@ from nano_rl.runtime.protocols import (
     WeightMeta,
     WeightShardSource,
 )
+from nano_rl.runtime.reward_backend import MockRewardBackend, RewardBackend, RewardResult
 from nano_rl.runtime.slot import GpuLease, RoleName
 
 
@@ -245,11 +246,17 @@ class TrainerRankRole:
 
 @dataclass
 class RewardActorRole:
-    name: str = "deterministic_length_reward"
+    backend: RewardBackend = field(default_factory=MockRewardBackend)
+
+    @property
+    def name(self) -> str:
+        return self.backend.name
 
     def score(self, prompt: str, response: str) -> float:
-        del prompt
-        return min(1.0, len(response) / 100.0)
+        return self.score_result(prompt, response).reward
+
+    def score_result(self, prompt: str, response: str) -> RewardResult:
+        return self.backend.score(prompt, response)
 
 
 def bootstrap_weight_meta(

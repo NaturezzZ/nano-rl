@@ -25,12 +25,13 @@ The initial Python runtime skeleton now includes:
 - `nano_rl.runtime.backends`: lazy-import vLLM rollout and FSDP2 trainer backend adapters with fake test backends.
 - `nano_rl.runtime.ray`: Ray driver boundary, CPU actor wrappers that own backend adapters, actor graph launcher, and custom-resource launch plan.
 
-`RayDriver.train()` always builds the resolved runtime and Ray launch plan. By
-default the example configs set `run.start_ray_actors: false`, so training emits
-the backend-integrated plan without creating long-lived Ray actors. Setting
-`run.start_ray_actors: true` starts the Ray actor graph; real vLLM/FSDP2
-execution then requires Ray, vLLM, PyTorch/FSDP2, model artifacts,
-`trainer.checkpoint_dir`, and trainer rendezvous metadata to be ready.
+`RayDriver.train()` always builds the resolved runtime and Ray launch plan.
+The non-mock example configs set `run.start_ray_actors: false`, so training
+emits the backend-integrated plan without creating long-lived Ray actors. The
+mock collocated/disaggregated examples set `run.start_ray_actors: true` and
+start the local Ray actor graph with mock backends. Real vLLM/FSDP2 execution
+requires Ray, vLLM, PyTorch/FSDP2, model artifacts, `trainer.checkpoint_dir`,
+and trainer rendezvous metadata to be ready.
 When `runtime.ray.address: auto`, startup first tries to attach to an existing
 Ray cluster. If none is reachable, the Ray startup controller creates a local
 single-machine Ray cluster with the resolved role-scoped custom resources.
@@ -39,8 +40,8 @@ Local validation:
 
 ```bash
 python3 -m pytest -q
-python3 main.py --config docs/examples/disaggregated.yaml --emit-resolved-config
-python3 scripts/smoke_local_runtime.py --config docs/examples/disaggregated.yaml --prompt "hello"
+python3 main.py --config recipes/disaggregated.yaml --emit-resolved-config
+python3 scripts/smoke_local_runtime.py --config recipes/disaggregated.yaml --prompt "hello"
 ```
 
 ## Documents
@@ -53,8 +54,8 @@ python3 scripts/smoke_local_runtime.py --config docs/examples/disaggregated.yaml
 - `docs/architecture/mode-fsm.md`: operational state machine for mode transitions and degradation.
 - `docs/protocols/runtime-config.schema.yaml`: Ray-native runtime configuration schema.
 - `docs/protocols/weight-transfer-plan.schema.yaml`: trainer-to-rollout weight transfer plan schema.
-- `docs/examples/collocated.yaml`: collocated config where every GPU toggles between rollout and train together.
-- `docs/examples/disaggregated.yaml`: disaggregated config with rollout-only GPU count plus shared rollout/train GPU count.
+- `recipes/collocated.yaml`: collocated config where every GPU toggles between rollout and train together.
+- `recipes/disaggregated.yaml`: disaggregated config with rollout-only GPU count plus shared rollout/train GPU count.
 
 ## Asset Download
 

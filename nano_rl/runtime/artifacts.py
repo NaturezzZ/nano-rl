@@ -20,7 +20,23 @@ def validate_input_artifacts(config: LaunchConfig) -> None:
     _validate_source("data.data_path", config.data.source_type, config.data.data_path, config)
 
 
-def _validate_source(field: str, source_type: SourceType, uri: str, config: LaunchConfig) -> None:
+def _validate_source(field: str, source_type: SourceType, uri: str | None, config: LaunchConfig) -> None:
+    if source_type in {SourceType.MOCK_INLINE, SourceType.MOCK_GENERATED}:
+        return
+
+    if source_type == SourceType.MOCK_JSONL:
+        if uri is None:
+            raise InvalidInputArtifactError(f"{field} is required for mock_jsonl")
+        path = Path(uri)
+        if not path.exists():
+            raise InvalidInputArtifactError(f"{field} mock_jsonl file does not exist: {uri}")
+        if not path.is_file():
+            raise InvalidInputArtifactError(f"{field} mock_jsonl path is not a file: {uri}")
+        return
+
+    if uri is None:
+        raise InvalidInputArtifactError(f"{field} is required for source_type: {source_type}")
+
     if source_type == SourceType.HDFS_URI:
         if not uri.startswith("hdfs://"):
             raise InvalidInputArtifactError(f"{field} must be hdfs:// for hdfs_uri: {uri}")

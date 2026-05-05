@@ -1,4 +1,4 @@
-"""Trainer backend boundary shared by fake and real FSDP2 implementations."""
+"""Trainer backend boundary shared by mock and real FSDP2 implementations."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from nano_rl.exceptions import NanoRLError, SlotStateError
 from nano_rl.runtime.protocols import TrainBatch, WeightFormat, WeightMeta
 from nano_rl.runtime.slot import GpuLease, RoleName
+from nano_rl.runtime.weight_store import WeightStore, build_mock_weight_payload, build_weight_store
 
 
 class BackendUnavailableError(NanoRLError):
@@ -49,7 +50,7 @@ class TrainerBackendConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    backend: Literal["fsdp2", "fake"] = "fsdp2"
+    backend: Literal["fsdp2", "mock", "fake"] = "fsdp2"
     rank: int = Field(ge=0)
     world_size: int = Field(ge=1)
     gpu_id: int = Field(ge=0)
@@ -124,6 +125,18 @@ class OptimizerStepResult(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
 
 
+class MockTrainerOptions(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    initial_loss: float = Field(default=1.0, gt=0)
+    loss_decay: Literal["reciprocal", "constant"] = "reciprocal"
+    export_format: WeightFormat = WeightFormat.VLLM_COMPATIBLE
+    optimizer_state: Literal["tracked", "stateless"] = "tracked"
+    require_rank0_export: bool = True
+    seed: int = Field(default=0, ge=0)
+    num_parameters: int = Field(default=1024, ge=0)
+
+
 class TrainerBackend(ABC):
     """Interface implemented by trainer rank execution backends."""
 
@@ -168,11 +181,13 @@ class TrainerBackend(ABC):
             os.environ["CUDA_VISIBLE_DEVICES"] = str(self.config.gpu_id)
 
 
-class FakeTrainerBackend(TrainerBackend):
+class MockTrainerBackend(TrainerBackend):
     """Deterministic trainer backend for CPU-only tests and local smoke paths."""
 
     def __init__(self, config: TrainerBackendConfig):
         super().__init__(config)
+        self.options = MockTrainerOptions.model_validate(config.extra.get("mock") or {})
+        self._weight_store = _build_optional_weight_store(config.extra)
         self._initialized = False
         self._gpu_resident = False
         self._train_step = 0
@@ -199,7 +214,7 @@ class FakeTrainerBackend(TrainerBackend):
             self.initialize_rank()
         self._gpu_resident = True
         self._train_step += 1
-        loss = 1.0 / max(1, batch.num_sequences + self.config.rank + self._train_step)
+        loss = self._loss(batch)
         return OptimizerStepResult(
             rank=self.config.rank,
             world_size=self.config.world_size,
@@ -213,13 +228,36 @@ class FakeTrainerBackend(TrainerBackend):
             lease_gpu_id=lease.gpu_id,
             lease_epoch=lease.lease_epoch,
             weight_version=self._weight_version,
-            metrics={"fake_loss": loss},
+            metrics={"mock_loss": loss, "fake_loss": loss},
         )
 
     def export_weight(self, parent: WeightMeta) -> WeightMeta:
-        if self.config.rank != 0:
+        if self.options.require_rank0_export and self.config.rank != 0:
             raise BackendStateError(f"trainer rank {self.config.rank} cannot export weights; rank 0 owns publish")
         version_id = parent.version_id + 1
+        payload = build_mock_weight_payload(
+            version_id=version_id,
+            parent_version=parent.version_id,
+            trainer_step=self._train_step,
+            model_path=parent.model_path,
+            format=self.options.export_format,
+            tokenizer_path=parent.tokenizer_path,
+            created_by=f"trainer-rank-{self.config.rank}",
+            metadata={
+                "backend": "mock",
+                "optimizer_state": self.options.optimizer_state,
+                "parent_checksum": parent.checksum,
+                "group_epoch": self.config.group_epoch,
+                "comm_epoch": self.config.comm_epoch,
+                "num_parameters": self.options.num_parameters,
+                "seed": self.options.seed,
+            },
+        )
+        if self._weight_store is not None:
+            exported = self._weight_store.store(payload)
+            self._weight_version = exported.version_id
+            return exported
+
         checksum = sha256(f"{parent.checksum}:{version_id}:{self._train_step}".encode()).hexdigest()
         self._weight_version = version_id
         return WeightMeta(
@@ -231,7 +269,7 @@ class FakeTrainerBackend(TrainerBackend):
             tokenizer_path=parent.tokenizer_path,
             artifact_uri=parent.artifact_uri,
             manifest_uri=parent.manifest_uri,
-            format=WeightFormat.VLLM_COMPATIBLE,
+            format=self.options.export_format,
             checksum=checksum,
             created_by=f"trainer-rank-{self.config.rank}",
         )
@@ -253,11 +291,20 @@ class FakeTrainerBackend(TrainerBackend):
             weight_version=self._weight_version,
             residency=residency,
             metadata={
-                "backend": "fake",
+                "backend": "mock",
+                "requested_backend": self.config.backend,
+                "compat_aliases": ["fake"],
                 "gpu_resident": self._gpu_resident,
+                "optimizer_state": self.options.optimizer_state,
                 "process_group": self.config.process_group.model_dump(mode="json"),
             },
         )
+
+    def _loss(self, batch: TrainBatch) -> float:
+        if self.options.loss_decay == "constant":
+            return self.options.initial_loss
+        denominator = max(1, batch.num_sequences + self.config.rank + self._train_step)
+        return self.options.initial_loss / denominator
 
     def _assert_state_matches_rank(self, state: TrainStateBundle) -> None:
         if state.rank != self.config.rank:
@@ -272,12 +319,15 @@ class FakeTrainerBackend(TrainerBackend):
             )
 
 
+FakeTrainerBackend = MockTrainerBackend
+
+
 def build_trainer_backend(config: TrainerBackendConfig | Mapping[str, Any]) -> TrainerBackend:
     """Build a trainer backend from runtime config."""
 
     resolved = config if isinstance(config, TrainerBackendConfig) else TrainerBackendConfig.model_validate(config)
-    if resolved.backend == "fake":
-        return FakeTrainerBackend(resolved)
+    if resolved.backend in {"mock", "fake"}:
+        return MockTrainerBackend(resolved)
     if resolved.backend == "fsdp2":
         from nano_rl.runtime.backends.fsdp2_backend import Fsdp2TrainerBackend
 
@@ -290,3 +340,17 @@ def checkpoint_version_dir(config: TrainerBackendConfig, version_id: int) -> Pat
     if not checkpoint_dir:
         raise BackendStateError("trainer backend requires checkpoint_dir to export weights")
     return Path(str(checkpoint_dir)).expanduser().resolve() / f"version-{version_id}"
+
+
+def _build_optional_weight_store(extra: Mapping[str, Any]) -> WeightStore | None:
+    for key in ("weight_store", "store", "weight_transfer_store"):
+        raw = extra.get(key)
+        if raw is None:
+            continue
+        if not isinstance(raw, Mapping):
+            raise BackendStateError(f"trainer backend extra['{key}'] must be a mapping")
+        try:
+            return build_weight_store(raw)
+        except Exception as exc:
+            raise BackendStateError(str(exc)) from exc
+    return None
