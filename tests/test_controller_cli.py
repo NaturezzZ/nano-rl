@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from main import main
+import main as cli_main
 from nano_rl.config import load_launch_config
 from nano_rl.exceptions import SlotStateError
 from nano_rl.runtime.protocols import WeightStatus
@@ -32,11 +32,12 @@ def test_controller_dry_run_plan_counts_gpus() -> None:
 
 
 def test_cli_emit_resolved_config_exits_without_artifact_validation(capsys) -> None:
-    code = main(["--config", str(ROOT / "recipes/collocated.yaml"), "--emit-resolved-config"])
+    code = cli_main.main(["--config", str(ROOT / "recipes/collocated.yaml"), "--emit-resolved-config"])
     captured = capsys.readouterr()
 
     assert code == 0
-    resolved = json.loads(captured.out)
+    assert captured.out == ""
+    resolved = json.loads(cli_main.RESOLVED_CONFIG_PATH.read_text(encoding="utf-8"))
     assert resolved["canonical_mode"] == "fully_sync"
     assert len(resolved["gpu_plan"]["rollout_workers"]) == 8
 
@@ -47,13 +48,16 @@ def test_cli_train_skip_artifact_validation_outputs_single_runtime_plan(capsys) 
     temp = ROOT / ".tmp-cli-train-skip.yaml"
     temp.write_text(yaml.safe_dump(raw))
     try:
-        code = main(["--config", str(temp), "--skip-artifact-validation"])
+        code = cli_main.main(["--config", str(temp), "--skip-artifact-validation"])
     finally:
         temp.unlink(missing_ok=True)
     captured = capsys.readouterr()
 
     assert code == 0
-    payload = json.loads(captured.out)
+    assert captured.out == ""
+    payload = json.loads(cli_main.RUN_RESULT_PATH.read_text(encoding="utf-8"))
+    resolved = json.loads(cli_main.RESOLVED_CONFIG_PATH.read_text(encoding="utf-8"))
+    assert resolved["canonical_mode"] == "standalone_hybrid"
     assert payload["canonical_mode"] == "standalone_hybrid"
     assert payload["execution_status"] == "planned_backend_integrated"
     assert payload["start_ray_actors"] is False

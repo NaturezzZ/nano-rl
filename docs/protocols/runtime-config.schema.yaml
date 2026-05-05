@@ -9,6 +9,10 @@ properties:
     properties:
       enabled: { type: boolean, default: false }
       seed: { type: integer, minimum: 0, default: 0 }
+      ray_actor_memory_mb:
+        type: [integer, "null"]
+        minimum: 1
+        description: Optional mock-only Ray actor heap-memory scheduling hint in MiB. This is a logical Ray resource request, not an OS memory limit.
       strict:
         type: object
         properties:
@@ -41,6 +45,7 @@ properties:
         enum: [train, dry_run, validate]
       emit_resolved_config:
         type: boolean
+        description: When true, write the resolved LaunchConfig JSON to .nano_rl/resolved-config.json and exit without printing it to stdout.
       start_ray_actors:
         type: boolean
         description: When false, train emits a backend-integrated launch plan without creating Ray actors. When true, RayDriver starts the Ray actor graph and actor wrappers construct vLLM/FSDP2 backend adapters lazily.

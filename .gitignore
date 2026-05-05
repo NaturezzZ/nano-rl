@@ -1,6 +1,10 @@
 artifacts/
 .cache/
+.nano_rl/
+.nano-rl-mock/
 __pycache__/
 *.py[cod]
 .vscode
 .rsyncignore
+*.log
+.pytest_cache/

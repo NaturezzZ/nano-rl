@@ -63,4 +63,4 @@ README 给出的核心组件分工可抽象为：
 
 ## 6) 与上版总结的差异说明
 
-上一版我错误参考了非你指定的仓库；本版已按你给的 `lastweek/FlashRL` 重新整理，后续 `plan-design.md` 将以本版为准。
+上一版我错误参考了非你指定的仓库；本版已按你给的 `lastweek/FlashRL` 重新整理，后续 `docs/plans/plan-design.md` 将以本版为准。

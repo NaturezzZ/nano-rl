@@ -23,15 +23,18 @@ The initial Python runtime skeleton now includes:
 - `nano_rl.runtime.controller`: dry-run controller plan and local smoke iteration.
 - `nano_rl.runtime.offload`: shared GPU residency/offload/hydrate state machine.
 - `nano_rl.runtime.backends`: lazy-import vLLM rollout and FSDP2 trainer backend adapters with fake test backends.
-- `nano_rl.runtime.ray`: Ray driver boundary, CPU actor wrappers that own backend adapters, actor graph launcher, and custom-resource launch plan.
+- `nano_rl.runtime.ray`: Ray driver boundary, CPU actor wrappers that own backend adapters, actor graph launcher, custom-resource launch plan, and driver-side training loop orchestration.
 
 `RayDriver.train()` always builds the resolved runtime and Ray launch plan.
 The non-mock example configs set `run.start_ray_actors: false`, so training
 emits the backend-integrated plan without creating long-lived Ray actors. The
 mock collocated/disaggregated examples set `run.start_ray_actors: true` and
-start the local Ray actor graph with mock backends. Real vLLM/FSDP2 execution
-requires Ray, vLLM, PyTorch/FSDP2, model artifacts, `trainer.checkpoint_dir`,
-and trainer rendezvous metadata to be ready.
+run the full Ray actor training loop with mock backends: prompt ingestion,
+rollout generation, reward scoring, sample queue reservation, trainer optimize,
+weight export, and rollout weight reactivation. Real vLLM/FSDP2 execution uses
+the same `main.py` path, but still requires Ray, vLLM, PyTorch/FSDP2, model
+artifacts, `trainer.checkpoint_dir`, and trainer rendezvous metadata to be
+ready.
 When `runtime.ray.address: auto`, startup first tries to attach to an existing
 Ray cluster. If none is reachable, the Ray startup controller creates a local
 single-machine Ray cluster with the resolved role-scoped custom resources.
@@ -41,14 +44,16 @@ Local validation:
 ```bash
 python3 -m pytest -q
 python3 main.py --config recipes/disaggregated.yaml --emit-resolved-config
+python3 main.py --config recipes/mock_collocated.yaml --skip-artifact-validation
 python3 scripts/smoke_local_runtime.py --config recipes/disaggregated.yaml --prompt "hello"
 ```
 
 ## Documents
 
 - `AGENTS.md`: repo-specific operating instructions for coding agents.
-- `ref-flashrl-design.md`: FlashRL design summary used as reference.
-- `plan-design.md`: detailed architecture/design plan for nano-rl.
+- `docs/plans/ref-flashrl-design.md`: FlashRL design summary used as reference.
+- `docs/plans/plan-design.md`: detailed architecture/design plan for nano-rl.
+- `docs/plans/plan-mock.md`: mock runtime design plan.
 - `docs/architecture/design.html`: browser-friendly living design document with
   SVG component and rollout-flow diagrams.
 - `docs/architecture/mode-fsm.md`: operational state machine for mode transitions and degradation.

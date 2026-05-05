@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -75,10 +76,11 @@ def _fake_builders(
     }
 
 
-def test_actor_graph_launcher_uses_zero_ray_gpus_and_role_resources() -> None:
+def test_actor_graph_launcher_uses_zero_ray_gpus_and_role_resources(caplog: pytest.LogCaptureFixture) -> None:
     config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     plan = build_ray_launch_plan(config)
     calls: list[dict[str, Any]] = []
+    caplog.set_level(logging.INFO, logger="nano_rl.runtime.ray.launcher")
 
     graph = RayActorGraphLauncher(
         plan,
@@ -102,6 +104,10 @@ def test_actor_graph_launcher_uses_zero_ray_gpus_and_role_resources() -> None:
     rollout_worker = next(call for call in calls if call["options"]["name"] == "rollout-dp-2-tp-0")
     assert rollout_worker["options"]["resources"] == {}
     assert graph.resource_summary["shared_gpu_ids"] == [4, 5, 6, 7]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("starting Ray actor graph creation" in message for message in messages)
+    assert any("creating Ray actor: name=controller" in message for message in messages)
+    assert any("Ray actor graph creation completed" in message for message in messages)
 
 
 def test_actor_graph_launcher_passes_init_args_from_launch_plan() -> None:
@@ -143,6 +149,22 @@ def test_actor_graph_launcher_passes_init_args_from_launch_plan() -> None:
     ]
 
 
+def test_actor_graph_launcher_passes_mock_memory_hint_to_ray_options() -> None:
+    config = load_launch_config(ROOT / "recipes/mock_disaggregated.yaml")
+    plan = build_ray_launch_plan(config)
+    calls: list[dict[str, Any]] = []
+
+    graph = RayActorGraphLauncher(
+        plan,
+        namespace=config.runtime.ray.namespace,
+        actor_class_builders=_fake_builders({spec.actor_type for spec in plan.actors}, calls),
+    ).start(dry_run=False)
+
+    expected = 64 * 1024 * 1024
+    assert all(call["options"]["memory"] == expected for call in calls)
+    assert set(graph.resource_summary["actor_memory_bytes"].values()) == {expected}
+
+
 def test_actor_graph_dry_run_does_not_create_remote_actors() -> None:
     config = load_launch_config(ROOT / "recipes/collocated.yaml")
     plan = build_ray_launch_plan(config)
@@ -171,11 +193,12 @@ def test_ray_cluster_controller_auto_connects_existing_cluster() -> None:
 
     assert result.startup_mode == "connected_existing"
     assert result.created_local_cluster is False
-    assert ray.init_calls == [{"namespace": "nano-rl", "address": "auto"}]
+    assert ray.init_calls == [{"namespace": "nano-rl", "address": "auto", "logging_level": "warning"}]
 
 
-def test_ray_cluster_controller_auto_falls_back_to_local_cluster() -> None:
+def test_ray_cluster_controller_auto_falls_back_to_local_cluster(caplog: pytest.LogCaptureFixture) -> None:
     ray = FakeRayModule(fail_auto_connect=True)
+    caplog.set_level(logging.INFO, logger="nano_rl.runtime.ray.cluster")
     result = RayClusterController(
         namespace="nano-rl",
         ray_address="auto",
@@ -187,12 +210,19 @@ def test_ray_cluster_controller_auto_falls_back_to_local_cluster() -> None:
     assert result.created_local_cluster is True
     assert result.fallback_reason == "RuntimeError: no cluster found"
     assert ray.init_calls == [
-        {"namespace": "nano-rl", "address": "auto"},
+        {"namespace": "nano-rl", "address": "auto", "logging_level": "warning"},
         {
             "namespace": "nano-rl",
             "resources": {"rollout_gpu_0": 1, "train_gpu_0": 1},
+            "logging_level": "warning",
         },
     ]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Ray runtime: checking for existing Ray cluster" in message for message in messages)
+    assert any("Ray runtime: no existing Ray cluster found; creating local Ray cluster" in message for message in messages)
+    assert any("Ray runtime: local Ray cluster created" in message for message in messages)
+    assert not any("no cluster found" in message for message in messages)
+    assert not any("custom_resources" in message for message in messages)
 
 
 def test_ray_cluster_controller_explicit_address_fails_without_local_fallback() -> None:
@@ -206,7 +236,9 @@ def test_ray_cluster_controller_explicit_address_fails_without_local_fallback() 
             ray_module=ray,
         ).ensure_initialized()
 
-    assert ray.init_calls == [{"namespace": "nano-rl", "address": "ray://head:10001"}]
+    assert ray.init_calls == [
+        {"namespace": "nano-rl", "address": "ray://head:10001", "logging_level": "warning"}
+    ]
 
 
 def test_actor_graph_launcher_records_auto_fallback_cluster_startup() -> None:
@@ -270,3 +302,35 @@ def test_ray_driver_train_can_start_actor_graph_when_config_requests_it() -> Non
     assert "trainer-rank-0" in result["ray_actor_graph"]["handles"]
     assert len(calls) == len(plan.actors)
     assert all(call["options"]["num_gpus"] == 0 for call in calls)
+
+
+def test_ray_driver_train_runs_training_loop_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    base_config = load_launch_config(ROOT / "recipes/mock_collocated.yaml")
+    config = base_config.model_copy(
+        update={"run": base_config.run.model_copy(update={"start_ray_actors": True})}
+    )
+
+    class FakeGraph:
+        handles = {"controller": object()}
+
+        def to_dict(self) -> dict[str, object]:
+            return {"handles": {"controller": "fake"}, "dry_run": False}
+
+    def fake_start_actor_graph(self: RayDriver, **kwargs: Any) -> FakeGraph:
+        return FakeGraph()
+
+    def fake_run_training_loop(self: Any) -> dict[str, object]:
+        return {
+            "status": "completed",
+            "steps_completed": 2,
+            "final_weight": {"version_id": 2},
+        }
+
+    monkeypatch.setattr(RayDriver, "start_actor_graph", fake_start_actor_graph)
+    monkeypatch.setattr("nano_rl.runtime.ray.driver.RayTrainingLoop.run", fake_run_training_loop)
+
+    result = RayDriver(config).train(validate_artifacts=False, start_ray=False, run_training_loop=True)
+
+    assert result["execution_status"] == "ray_training_completed"
+    assert result["training_result"]["steps_completed"] == 2
+    assert result["training_result"]["final_weight"]["version_id"] == 2

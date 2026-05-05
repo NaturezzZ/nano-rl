@@ -89,6 +89,14 @@ def test_ray_driver_dry_run_includes_launch_plan() -> None:
     assert all(actor["num_gpus"] == 0 for actor in actors)
 
 
+def test_mock_launch_plan_uses_configured_actor_memory_hint() -> None:
+    config = load_launch_config(ROOT / "recipes/mock_disaggregated.yaml")
+    plan = build_ray_launch_plan(config)
+
+    assert config.mock.ray_actor_memory_mb == 64
+    assert {actor.memory_bytes for actor in plan.actors} == {64 * 1024 * 1024}
+
+
 def test_ray_actor_builders_are_importable_when_ray_is_available() -> None:
     pytest.importorskip("ray")
 

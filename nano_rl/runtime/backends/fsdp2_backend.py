@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
 from importlib import import_module
+import logging
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -21,6 +22,9 @@ from nano_rl.runtime.backends.trainer_backend import (
 )
 from nano_rl.runtime.protocols import SampleRecord, TrainBatch, WeightFormat, WeightMeta
 from nano_rl.runtime.slot import GpuLease
+
+
+logger = logging.getLogger(__name__)
 
 
 class Fsdp2TrainerBackend(TrainerBackend):
@@ -44,13 +48,33 @@ class Fsdp2TrainerBackend(TrainerBackend):
         self._device: Any | None = None
 
     def initialize_rank(self) -> TrainStateBundle:
+        logger.info(
+            "FSDP2 rank initialization started: rank=%s world_size=%s gpu_id=%s model_path=%s",
+            self.config.rank,
+            self.config.world_size,
+            self.config.gpu_id,
+            self.config.model_path,
+        )
         modules = self._require_fsdp2()
         self._maybe_init_process_group(modules)
         self._ensure_model_and_optimizer(modules)
         self._initialized = True
-        return self._state_bundle(residency="unloaded")
+        state = self._state_bundle(residency="unloaded")
+        logger.info(
+            "FSDP2 rank initialization completed: rank=%s group_epoch=%s comm_epoch=%s",
+            self.config.rank,
+            self.config.group_epoch,
+            self.config.comm_epoch,
+        )
+        return state
 
     def hydrate(self, state: TrainStateBundle | None = None, *, lease: GpuLease) -> TrainStateBundle:
+        logger.info(
+            "FSDP2 hydrate started: rank=%s gpu_id=%s lease_epoch=%s",
+            self.config.rank,
+            lease.gpu_id,
+            lease.lease_epoch,
+        )
         self._assert_trainer_lease(lease)
         modules = self._require_fsdp2()
         if not self._initialized:
@@ -61,9 +85,18 @@ class Fsdp2TrainerBackend(TrainerBackend):
             self._weight_version = state.weight_version
         self._move_model_to_device(modules)
         self._hydrated = True
-        return self._state_bundle(residency="cpu_standby")
+        hydrated = self._state_bundle(residency="cpu_standby")
+        logger.info("FSDP2 hydrate completed: rank=%s residency=%s", self.config.rank, hydrated.residency)
+        return hydrated
 
     def optimize(self, batch: TrainBatch, *, lease: GpuLease) -> OptimizerStepResult:
+        logger.info(
+            "FSDP2 optimize started: rank=%s train_batch_id=%s num_sequences=%s num_tokens=%s",
+            self.config.rank,
+            batch.train_batch_id,
+            batch.num_sequences,
+            batch.num_tokens,
+        )
         self._assert_trainer_lease(lease)
         modules = self._require_fsdp2()
         if not self._initialized:
@@ -105,7 +138,7 @@ class Fsdp2TrainerBackend(TrainerBackend):
         optimizer.zero_grad(set_to_none=True)
         self._train_step += 1
         loss_value = float(loss.detach().cpu().item())
-        return OptimizerStepResult(
+        result = OptimizerStepResult(
             rank=self.config.rank,
             world_size=self.config.world_size,
             group_epoch=self.config.group_epoch,
@@ -120,8 +153,21 @@ class Fsdp2TrainerBackend(TrainerBackend):
             weight_version=self._weight_version,
             metrics={"lm_loss": loss_value},
         )
+        logger.info(
+            "FSDP2 optimize completed: rank=%s train_step=%s loss=%s",
+            self.config.rank,
+            result.train_step,
+            result.loss,
+        )
+        return result
 
     def export_weight(self, parent: WeightMeta) -> WeightMeta:
+        logger.info(
+            "FSDP2 export_weight started: rank=%s parent_version=%s checkpoint_dir=%s",
+            self.config.rank,
+            parent.version_id,
+            self.config.checkpoint_dir,
+        )
         if self.config.rank != 0:
             raise BackendStateError(f"trainer rank {self.config.rank} cannot export weights; rank 0 owns publish")
         self._require_fsdp2()
@@ -135,7 +181,7 @@ class Fsdp2TrainerBackend(TrainerBackend):
             tokenizer.save_pretrained(output_dir)
         checksum = _hash_checkpoint_dir(output_dir)
         self._weight_version = version_id
-        return WeightMeta(
+        exported = WeightMeta(
             version_id=version_id,
             parent_version=parent.version_id,
             trainer_step=self._train_step,
@@ -147,8 +193,22 @@ class Fsdp2TrainerBackend(TrainerBackend):
             checksum=checksum,
             created_by=f"trainer-rank-{self.config.rank}",
         )
+        logger.info(
+            "FSDP2 export_weight completed: rank=%s version=%s artifact_uri=%s checksum=%s",
+            self.config.rank,
+            exported.version_id,
+            exported.artifact_uri,
+            exported.checksum,
+        )
+        return exported
 
     def offload(self, *, lease: GpuLease) -> TrainStateBundle:
+        logger.info(
+            "FSDP2 offload started: rank=%s gpu_id=%s lease_epoch=%s",
+            self.config.rank,
+            lease.gpu_id,
+            lease.lease_epoch,
+        )
         self._assert_trainer_lease(lease)
         modules = self._require_fsdp2()
         if not self._initialized:
@@ -158,12 +218,15 @@ class Fsdp2TrainerBackend(TrainerBackend):
         if modules["torch"].cuda.is_available():
             modules["torch"].cuda.empty_cache()
         self._hydrated = False
-        return self._state_bundle(residency="cpu_standby")
+        state = self._state_bundle(residency="cpu_standby")
+        logger.info("FSDP2 offload completed: rank=%s residency=%s", self.config.rank, state.residency)
+        return state
 
     def _require_fsdp2(self) -> dict[str, ModuleType]:
         if self._torch_modules is not None:
             return self._torch_modules
 
+        logger.info("FSDP2 dependency import started: rank=%s", self.config.rank)
         self._set_cuda_visible_devices()
         try:
             torch = import_module("torch")
@@ -190,13 +253,16 @@ class Fsdp2TrainerBackend(TrainerBackend):
             "fsdp": fsdp_module,
             "transformers": transformers,
         }
+        logger.info("FSDP2 dependency import completed: rank=%s", self.config.rank)
         return self._torch_modules
 
     def _maybe_init_process_group(self, modules: dict[str, ModuleType]) -> None:
         if self.config.world_size <= 1:
+            logger.info("FSDP2 process group skipped for single rank: rank=%s", self.config.rank)
             return
         distributed = modules["distributed"]
         if distributed.is_initialized():
+            logger.info("FSDP2 process group already initialized: rank=%s", self.config.rank)
             return
         if not self.config.rendezvous and not self.config.store_endpoint:
             raise BackendStateError(
@@ -205,26 +271,36 @@ class Fsdp2TrainerBackend(TrainerBackend):
         init_method = self.config.rendezvous
         if init_method is None and self.config.store_endpoint:
             init_method = f"tcp://{self.config.store_endpoint}"
+        logger.info(
+            "FSDP2 process group init started: rank=%s world_size=%s init_method=%s",
+            self.config.rank,
+            self.config.world_size,
+            init_method,
+        )
         distributed.init_process_group(
             backend=str(self.config.extra.get("dist_backend", "nccl")),
             init_method=init_method,
             rank=self.config.rank,
             world_size=self.config.world_size,
         )
+        logger.info("FSDP2 process group init completed: rank=%s", self.config.rank)
 
     def _ensure_model_and_optimizer(self, modules: dict[str, ModuleType]) -> None:
         if self._model is not None and self._optimizer is not None:
+            logger.info("FSDP2 model and optimizer already initialized: rank=%s", self.config.rank)
             return
         model_path = self.config.model_path
         if not model_path:
             raise BackendStateError("FSDP2 trainer backend requires model_path")
 
         transformers = modules["transformers"]
+        logger.info("FSDP2 model load started: rank=%s model_path=%s", self.config.rank, model_path)
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_path,
             trust_remote_code=bool(self.config.extra.get("trust_remote_code", False)),
             torch_dtype=self._torch_dtype(modules),
         )
+        logger.info("FSDP2 tokenizer load started: rank=%s model_path=%s", self.config.rank, model_path)
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=bool(self.config.extra.get("trust_remote_code", False)),
@@ -236,14 +312,17 @@ class Fsdp2TrainerBackend(TrainerBackend):
             fully_shard = getattr(modules["fsdp"], "fully_shard", None)
             if fully_shard is None:
                 raise BackendUnavailableError("PyTorch FSDP2 backend is unavailable: missing fully_shard")
+            logger.info("FSDP2 fully_shard started: rank=%s", self.config.rank)
             maybe_model = fully_shard(model)
             if maybe_model is not None:
                 model = maybe_model
+            logger.info("FSDP2 fully_shard completed: rank=%s", self.config.rank)
 
         self._model = model
         self._tokenizer = tokenizer
         self._move_model_to_device(modules)
         self._optimizer = self._build_optimizer(modules)
+        logger.info("FSDP2 model and optimizer initialized: rank=%s", self.config.rank)
 
     def _build_optimizer(self, modules: dict[str, ModuleType]) -> Any:
         optimizer_name = self.config.optimizer_name.lower()

@@ -19,6 +19,7 @@ class RayActorSpec(BaseModel):
     import_path: str | None = None
     num_cpus: float = Field(default=0, ge=0)
     num_gpus: float = Field(default=0, ge=0)
+    memory_bytes: int | None = Field(default=None, ge=1)
     resources: dict[str, float] = Field(default_factory=dict)
     init_args: tuple[Any, ...] = Field(default_factory=tuple)
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -38,6 +39,7 @@ class RayLaunchPlan(BaseModel):
 
     node_custom_resources: dict[str, float]
     actors: tuple[RayActorSpec, ...]
+    node_num_cpus: int | None = Field(default=None, ge=1)
     backend_summary: dict[str, str] = Field(default_factory=dict)
 
     @property
@@ -50,6 +52,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
 
     placement = config.runtime.ray.placement
     role_classes = config.runtime.ray.gpu_manager.role_classes
+    mock_actor_memory_bytes = _mock_actor_memory_bytes(config)
 
     node_custom_resources: dict[str, float] = {}
     actors: list[RayActorSpec] = [
@@ -193,10 +196,17 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
             )
         )
 
+    if mock_actor_memory_bytes is not None:
+        actors = [
+            actor.model_copy(update={"memory_bytes": mock_actor_memory_bytes})
+            for actor in actors
+        ]
+
     _validate_role_resource_uniqueness(actors)
     return RayLaunchPlan(
         node_custom_resources=node_custom_resources,
         actors=tuple(actors),
+        node_num_cpus=config.runtime.local.cpus,
         backend_summary={
             "rollout": config.rollout.backend,
             "trainer": config.trainer.backend,
@@ -205,6 +215,12 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
             "reward": config.reward.backend,
         },
     )
+
+
+def _mock_actor_memory_bytes(config: LaunchConfig) -> int | None:
+    if not config.mock.enabled or config.mock.ray_actor_memory_mb is None:
+        return None
+    return config.mock.ray_actor_memory_mb * 1024 * 1024
 
 
 def _trainer_backend_extra(config: LaunchConfig) -> dict[str, Any]:

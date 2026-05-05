@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 import importlib
+import logging
 import os
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from nano_rl.runtime.slot import GpuLease, RoleName
 
 
 EngineFactory = Callable[["VllmBackendConfig", WeightMeta], Any]
+logger = logging.getLogger(__name__)
 
 
 class VllmBackendError(RuntimeError):
@@ -162,14 +164,34 @@ class VllmRolloutBackend:
         lease: GpuLease | Sequence[GpuLease],
         transfer_source: WeightShardSource | None = None,
     ) -> None:
+        logger.info(
+            "vLLM activate_weight started: version=%s gpu_ids=%s tensor_parallel_size=%s",
+            meta.version_id,
+            list(self.config.gpu_ids),
+            self.config.tensor_parallel_size,
+        )
         self._assert_rollout_lease(lease)
         if self._engine is None:
             config = self._config_for_weight(meta)
+            logger.info(
+                "vLLM engine construction started: version=%s model_path=%s tokenizer_path=%s cuda_visible_devices=%s",
+                meta.version_id,
+                config.model_path,
+                config.tokenizer_path,
+                config.cuda_visible_devices,
+            )
             config.apply_cuda_visible_devices()
             self._engine = self._engine_factory(config, meta)
+            logger.info("vLLM engine construction completed: version=%s", meta.version_id)
         _notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
         self._active_weight = meta
         self._active_weight_source = transfer_source
+        logger.info(
+            "vLLM activate_weight completed: version=%s checksum=%s transfer_source=%s",
+            meta.version_id,
+            meta.checksum,
+            None if transfer_source is None else transfer_source.kind.value,
+        )
 
     def generate(
         self,
@@ -180,6 +202,11 @@ class VllmRolloutBackend:
         lease: GpuLease | Sequence[GpuLease],
         request_id: str | None = None,
     ) -> GenerationOutput:
+        logger.info(
+            "vLLM generate started: request_id=%s target_policy_version=%s",
+            request_id,
+            target_policy_version,
+        )
         self._assert_rollout_lease(lease)
         if self._active_weight is None:
             raise VllmBackendError("cannot generate before activate_weight")
@@ -194,7 +221,7 @@ class VllmRolloutBackend:
             sampling_params=self.config.sampling_params,
             request_metadata=request_metadata or {},
         )
-        return _normalize_generation_output(
+        output = _normalize_generation_output(
             raw_output,
             prompt=prompt,
             target_policy_version=target_policy_version,
@@ -202,6 +229,13 @@ class VllmRolloutBackend:
             request_id=request_id,
             request_metadata=request_metadata or {},
         )
+        logger.info(
+            "vLLM generate completed: request_id=%s policy_version=%s token_count=%s",
+            output.request_id,
+            output.policy_version,
+            len(output.tokens),
+        )
+        return output
 
     def _config_for_weight(self, meta: WeightMeta) -> VllmBackendConfig:
         return self.config.model_copy(

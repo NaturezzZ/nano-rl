@@ -763,7 +763,7 @@ trainer:
 - `README.md`
   - 增加 mock runtime 入口命令。
 
-如果该方案进入实现阶段，还应同步 `plan-design.md` 与 `docs/architecture/design.html`，因为 mock backend 会成为正式架构能力。
+如果该方案进入实现阶段，还应同步 `docs/plans/plan-design.md` 与 `docs/architecture/design.html`，因为 mock backend 会成为正式架构能力。
 
 ---
 
@@ -1453,7 +1453,7 @@ python3 scripts/smoke_local_runtime.py --config recipes/mock_disaggregated.yaml 
 
 如果开始实现该方案，需要同步：
 
-- `plan-design.md`：加入 mock runtime 作为正式 v0.1 开发/验证模式；
+- `docs/plans/plan-design.md`：加入 mock runtime 作为正式 v0.1 开发/验证模式；
 - `docs/architecture/design.html`：加入 mock backend/component diagram；
 - `docs/architecture/mode-fsm.md`：说明 mock 不改变 mode FSM，只替换 backend leaf；
 - `AGENTS.md`：加入 mock validation commands。

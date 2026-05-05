@@ -102,6 +102,7 @@ class MockFailureInjectionConfig(BaseModel):
 class MockConfig(BaseModel):
     enabled: bool = False
     seed: int = Field(default=0, ge=0)
+    ray_actor_memory_mb: int | None = Field(default=None, ge=1)
     strict: MockStrictConfig = Field(default_factory=MockStrictConfig)
     timing: MockTimingConfig = Field(default_factory=MockTimingConfig)
     failure_injection: MockFailureInjectionConfig = Field(default_factory=MockFailureInjectionConfig)

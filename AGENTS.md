@@ -25,8 +25,9 @@ truth before adding code.
 Canonical documents:
 
 - `README.md`: short project overview and document index.
-- `ref-flashrl-design.md`: reference extraction from `lastweek/FlashRL`.
-- `plan-design.md`: main architecture plan for nano-rl.
+- `docs/plans/ref-flashrl-design.md`: reference extraction from `lastweek/FlashRL`.
+- `docs/plans/plan-design.md`: main architecture plan for nano-rl.
+- `docs/plans/plan-mock.md`: mock runtime design plan.
 - `docs/architecture/design.html`: browser-friendly living design document with
   SVG component and rollout-flow diagrams; update it with architecture changes.
 - `docs/architecture/mode-fsm.md`: operating mode state machine.
@@ -111,13 +112,13 @@ Canonical documents:
 ## Implementation Guidance
 
 - Before implementing or changing architecture, write the design update into
-  `plan-design.md` and, when relevant, `docs/protocols/` schemas and
+  `docs/plans/plan-design.md` and, when relevant, `docs/protocols/` schemas and
   `recipes/` runtime configs.
 - Keep `docs/architecture/design.html` synchronized with architecture changes
   that affect components, Ray actors, GPU leases, runtime flows, schemas, or
   examples.
 - When the user accepts a design direction with wording such as "不错，就这样干",
-  update `plan-design.md`, `docs/architecture/design.html`, and relevant
+  update `docs/plans/plan-design.md`, `docs/architecture/design.html`, and relevant
   schemas/recipes in the same pass; do not wait for a separate reminder.
 - Keep `main.py` thin: locate/read the YAML config, validate, normalize, emit the
   resolved config when requested, and hand off to the Ray driver. Do not put the

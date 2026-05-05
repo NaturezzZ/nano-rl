@@ -398,14 +398,14 @@
       <h2>维护契约</h2>
       <div class="callout">
         <p>
-          本 HTML 是 <code>plan-design.md</code>、<code>docs/architecture/mode-fsm.md</code>、
+          本 HTML 是 <code>docs/plans/plan-design.md</code>、<code>docs/architecture/mode-fsm.md</code>、
           <code>docs/protocols/*.yaml</code> 和 <code>recipes/*.yaml</code> 的浏览版索引。
           它不是新的架构源头。后续如果修改 mode、actor、GPU lease、schema、rollout/train 流程或示例 YAML，
           同一个变更集中也要更新本文件。
         </p>
       </div>
       <ol>
-        <li>先更新事实源：主设计写入 <code>plan-design.md</code>，状态机写入 <code>docs/architecture/mode-fsm.md</code>，协议字段写入 <code>docs/protocols/</code>。</li>
+        <li>先更新事实源：主设计写入 <code>docs/plans/plan-design.md</code>，状态机写入 <code>docs/architecture/mode-fsm.md</code>，协议字段写入 <code>docs/protocols/</code>。</li>
         <li>再更新本 HTML：同步组件说明、actor 表、SVG 图和约束说明。</li>
         <li>最后跑轻量验证：Markdown 链接保持可读，YAML schema/example 可解析，HTML 可被基本 parser 读取。</li>
       </ol>
@@ -445,7 +445,7 @@
         </div>
         <div class="box">
           <h3>Execution backends</h3>
-          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph。</p>
+          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter，<code>RayTrainingLoop</code> 会在 graph 启动后串接 rollout、reward、sample queue、trainer、weight registry 和 weight activation。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph 并执行训练循环。</p>
         </div>
       </div>
     </section>
@@ -716,7 +716,7 @@
       <div class="grid-2">
         <div class="box">
           <h3><code>main.py</code> 与配置加载</h3>
-          <p>用户入口只负责读取 YAML、处理 <code>run.intent</code>、归一化 mode、校验 artifact 和资源拓扑、输出 resolved config，并生成不可变 <code>LaunchConfig</code>。训练参数不应拆成命令行覆盖面。</p>
+          <p>用户入口只负责读取 YAML、处理 <code>run.intent</code>、归一化 mode、校验 artifact 和资源拓扑、将 resolved config 写入被 git ignore 的 <code>.nano_rl/resolved-config.json</code>，并生成不可变 <code>LaunchConfig</code>。训练参数不应拆成命令行覆盖面。</p>
         </div>
         <div class="box">
           <h3>Ray Driver</h3>
@@ -961,8 +961,8 @@
       <p>本 HTML 当前依据以下仓库文件整理。未来修改这些文件时，需同步检查本 HTML 的对应章节和 SVG。</p>
       <ul class="source-list">
         <li><a href="../../README.md"><code>README.md</code></a>：项目定位和文档索引。</li>
-        <li><a href="../../plan-design.md"><code>plan-design.md</code></a>：主架构、actor、模式、协议、调度、故障恢复。</li>
-        <li><a href="../../ref-flashrl-design.md"><code>ref-flashrl-design.md</code></a>：FlashRL 参考抽取。</li>
+        <li><a href="../plans/plan-design.md"><code>docs/plans/plan-design.md</code></a>：主架构、actor、模式、协议、调度、故障恢复。</li>
+        <li><a href="../plans/ref-flashrl-design.md"><code>docs/plans/ref-flashrl-design.md</code></a>：FlashRL 参考抽取。</li>
         <li><a href="mode-fsm.md"><code>docs/architecture/mode-fsm.md</code></a>：mode normalization 和 shared GPU lease FSM。</li>
         <li><a href="../protocols/runtime-config.schema.yaml"><code>docs/protocols/runtime-config.schema.yaml</code></a>：runtime config schema。</li>
         <li><a href="../protocols/sample-record.schema.yaml"><code>docs/protocols/sample-record.schema.yaml</code></a>：sample record schema。</li>
