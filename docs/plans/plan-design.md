@@ -172,11 +172,11 @@ TrainerRankActor(num_gpus=0, resources={"train_gpu_4": 1})
 
 - `nano_rl.runtime.ray.cluster.RayClusterController`：封装 Ray cluster connect-or-create 逻辑；`address=auto` 先连已有 cluster，失败后创建带 `node_custom_resources` 的本机 cluster；显式 address 连接失败时不 fallback；
 - `nano_rl.runtime.ray.launcher.RayActorGraphLauncher`：根据 `RayLaunchPlan` 创建真实 Ray actor graph；`run.start_ray_actors=false` 只返回 plan，`run.start_ray_actors=true` 才初始化 Ray 并启动 actors；
-- `nano_rl.runtime.ray.training.RayTrainingLoop`：在真实 actor graph 启动后执行 bounded training loop；mock configs 已经能通过 `main.py` 完成多 step rollout -> reward -> train -> publish weight；
-- `nano_rl.runtime.ray.actors.RolloutReplicaControllerActor`：构造 `VllmRolloutBackend`，在 `activate_weight()` / `generate()` 中把 Ray actor 调用转成 vLLM backend adapter 调用；
+- `nano_rl.runtime.ray.training.RayTrainingLoop`：在真实 actor graph 启动后执行 bounded training loop；mock configs 已经能通过 `main.py` 完成多 step rollout -> reward -> train -> publish weight，并在 shared GPU train window 前后显式调用 rollout offload/wake 与 trainer offload；
+- `nano_rl.runtime.ray.actors.RolloutReplicaControllerActor`：构造 `VllmRolloutBackend`，在 `activate_weight()` / `generate()` / `offload()` / `wake()` 中把 Ray actor 调用转成 vLLM backend adapter 调用；
 - `nano_rl.runtime.ray.actors.TrainerRankActor`：构造 `Fsdp2TrainerBackend`，在 `initialize_rank()` / `hydrate()` / `optimize()` / `export_weight()` / `offload()` 中转接 FSDP2 trainer backend adapter；
-- `nano_rl.runtime.backends.vllm_backend.VllmRolloutBackend`：lazy-import vLLM，统一 `activate_weight` / `generate` 输出，并在 CUDA-facing 方法入口校验 rollout lease；
-- `nano_rl.runtime.backends.fsdp2_backend.Fsdp2TrainerBackend` 与 `FakeTrainerBackend`：保留 FSDP2 rank/process-group/comm-epoch 边界；真实 FSDP2 运行依赖可加载的模型、`trainer.checkpoint_dir`、torch/FSDP2/transformers 依赖和多 rank rendezvous/store endpoint；
+- `nano_rl.runtime.backends.vllm_backend.VllmRolloutBackend`：lazy-import vLLM，统一 `activate_weight` / `generate` / `offload` / `wake` 输出，并在 CUDA-facing 方法入口校验 rollout lease；
+- `nano_rl.runtime.backends.fsdp2_backend.Fsdp2TrainerBackend` 与 `FakeTrainerBackend`：保留 FSDP2 rank/process-group/comm-epoch 边界；初始化后和每轮 train 后都回到 CPU standby，真实 FSDP2 运行依赖可加载的模型、`trainer.checkpoint_dir`、torch/FSDP2/transformers 依赖和多 rank rendezvous/store endpoint；
 - `nano_rl.runtime.offload.GpuResidencyManagerCore`：把 shared GPU rollout/train 切换建成可执行 residency 状态机，Controller 的 train enter/exit 已经通过它执行 offload/hydrate hooks 和 lease epoch 校验。
 
 | Actor | Ray 资源 | 主要职责 |

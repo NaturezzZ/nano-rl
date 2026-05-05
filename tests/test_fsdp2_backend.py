@@ -192,9 +192,12 @@ class FakeAdamW:
         self.weight_decay = weight_decay
         self.step_calls = 0
         self.zero_grad_calls: list[dict[str, Any]] = []
+        self.state: dict[str, dict[str, FakeTensor]] = {}
 
     def step(self) -> None:
         self.step_calls += 1
+        self.state.setdefault("param", {})["exp_avg"] = FakeTensor("avg")
+        self.state.setdefault("param", {})["exp_avg_sq"] = FakeTensor("avg_sq")
 
     def zero_grad(self, **kwargs: Any) -> None:
         self.zero_grad_calls.append(kwargs)
@@ -399,6 +402,7 @@ def test_fsdp2_backend_runs_lm_step_exports_and_offloads(
 
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
     assert initialized.metadata["backend"] == "fsdp2"
+    assert initialized.residency == "cpu_standby"
     assert hydrated.metadata["hydrated"] is True
     assert result.train_step == 1
     assert result.loss == pytest.approx(2.5)
@@ -424,7 +428,13 @@ def test_fsdp2_backend_runs_lm_step_exports_and_offloads(
     assert (tmp_path / "version-8" / "model.txt").exists()
     assert (tmp_path / "version-8" / "tokenizer.txt").exists()
     assert modules.model.to_devices[-1] == "cpu"
-    assert modules.empty_cache_calls == 1
+    assert modules.optimizers[0].state["param"]["exp_avg"].devices[-1] == "cpu"
+    assert modules.optimizers[0].state["param"]["exp_avg_sq"].devices[-1] == "cpu"
+    rehydrated = backend.hydrate(offloaded, lease=lease)
+    assert rehydrated.metadata["hydrated"] is True
+    assert modules.optimizers[0].state["param"]["exp_avg"].devices[-1] == "cuda:0"
+    assert modules.optimizers[0].state["param"]["exp_avg_sq"].devices[-1] == "cuda:0"
+    assert modules.empty_cache_calls == 2
     assert offloaded.train_step == 1
 
 

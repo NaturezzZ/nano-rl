@@ -69,6 +69,34 @@ def test_rollout_manager_pumps_backlog_until_capacity_or_backpressure() -> None:
     assert resumed[0].prompt == "e"
 
 
+def test_rollout_manager_preserves_prompt_metadata() -> None:
+    config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
+    manager = RolloutManagerCore(config.gpu_plan.rollout_replicas, max_in_flight_per_replica=1)
+    manager.enqueue_prompts(
+        [
+            {
+                "prompt_id": "p0",
+                "prompt": "hello",
+                "metadata": {"prompt_tokens": 9, "source": "mock"},
+            }
+        ]
+    )
+
+    requests = manager.dispatch_from_backlog(
+        target_policy_version=2,
+        controller_step=10,
+        output_queue_depth=0,
+        output_queue_high_watermark=10,
+    )
+
+    assert len(requests) == 1
+    assert requests[0].prompt == "hello"
+    assert requests[0].metadata["prompt_id"] == "p0"
+    assert requests[0].metadata["prompt_tokens"] == 9
+    assert requests[0].metadata["source"] == "mock"
+    assert requests[0].metadata["controller_step"] == 10
+
+
 def test_trainer_coordinator_assigns_shared_gpus_and_reserves_batch() -> None:
     config = load_launch_config(ROOT / "recipes/disaggregated.yaml")
     coordinator = TrainerCoordinatorCore(config.gpu_plan.trainer_ranks)

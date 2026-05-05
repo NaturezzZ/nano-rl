@@ -8,7 +8,7 @@ actors to call later while remaining importable on machines without vLLM.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 import importlib
 import logging
 import os
@@ -73,6 +73,8 @@ class VllmBackendConfig(BaseModel):
     holder_id: str | None = None
     holder_ids: tuple[str, ...] = ()
     set_cuda_visible_devices: bool = True
+    offload_strategy: Literal["vllm_sleep", "teardown_and_reload"] = "vllm_sleep"
+    vllm_sleep_level: Literal[1, 2] = 2
 
     @model_validator(mode="after")
     def _validate_gpu_binding(self) -> "VllmBackendConfig":
@@ -134,6 +136,12 @@ class RolloutBackend(Protocol):
     ) -> GenerationOutput:
         """Generate one completion under a rollout lease."""
 
+    def offload(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, Any]:
+        """Move rollout engine residency out of GPU memory under a rollout lease."""
+
+    def wake(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, Any]:
+        """Restore rollout engine residency before generation under a rollout lease."""
+
 
 class VllmRolloutBackend:
     """Rollout backend adapter around a lazily constructed vLLM engine."""
@@ -144,6 +152,7 @@ class VllmRolloutBackend:
         self._engine: Any | None = None
         self._active_weight: WeightMeta | None = None
         self._active_weight_source: WeightShardSource | None = None
+        self._offloaded = False
 
     @property
     def active_weight(self) -> WeightMeta | None:
@@ -183,6 +192,9 @@ class VllmRolloutBackend:
             config.apply_cuda_visible_devices()
             self._engine = self._engine_factory(config, meta)
             logger.info("vLLM engine construction completed: version=%s", meta.version_id)
+            self._offloaded = False
+        if self._offloaded:
+            self.wake(lease=lease)
         _notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
         self._active_weight = meta
         self._active_weight_source = transfer_source
@@ -210,6 +222,8 @@ class VllmRolloutBackend:
         self._assert_rollout_lease(lease)
         if self._active_weight is None:
             raise VllmBackendError("cannot generate before activate_weight")
+        if self._offloaded:
+            raise VllmBackendError("vLLM engine is offloaded; wake it before generate")
         if self._active_weight.version_id != target_policy_version:
             raise VllmBackendError(
                 f"active weight version {self._active_weight.version_id} does not match target {target_policy_version}"
@@ -237,6 +251,68 @@ class VllmRolloutBackend:
         )
         return output
 
+    def offload(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, Any]:
+        self._assert_rollout_lease(lease)
+        logger.info(
+            "vLLM offload started: active_version=%s strategy=%s sleep_level=%s",
+            None if self._active_weight is None else self._active_weight.version_id,
+            self.config.offload_strategy,
+            self.config.vllm_sleep_level,
+        )
+        if self._engine is None:
+            self._offloaded = True
+            return self._residency_state("offloaded", action="noop_no_engine")
+
+        action = "sleep"
+        if self.config.offload_strategy == "vllm_sleep":
+            slept = _call_engine_sleep(self._engine, level=self.config.vllm_sleep_level)
+            if not slept:
+                logger.warning("vLLM engine does not expose sleep/offload; tearing down engine for CPU standby")
+                self._engine = None
+                action = "teardown_missing_sleep"
+        else:
+            self._engine = None
+            action = "teardown"
+        self._offloaded = True
+        state = self._residency_state("offloaded", action=action)
+        logger.info(
+            "vLLM offload completed: active_version=%s action=%s",
+            state["active_weight_version"],
+            action,
+        )
+        return state
+
+    def wake(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, Any]:
+        self._assert_rollout_lease(lease)
+        logger.info(
+            "vLLM wake started: active_version=%s has_engine=%s",
+            None if self._active_weight is None else self._active_weight.version_id,
+            self._engine is not None,
+        )
+        action = "noop"
+        if self._active_weight is None:
+            self._offloaded = False
+            return self._residency_state("active", action="noop_no_weight")
+        if self._engine is None:
+            config = self._config_for_weight(self._active_weight)
+            config.apply_cuda_visible_devices()
+            self._engine = self._engine_factory(config, self._active_weight)
+            _notify_engine_weight(self._engine, self._active_weight, transfer_source=self._active_weight_source)
+            action = "reconstruct"
+        elif self._offloaded:
+            woke = _call_engine_wake(self._engine)
+            if not woke:
+                raise VllmBackendError("vLLM engine is offloaded but exposes no wake method")
+            action = "wake"
+        self._offloaded = False
+        state = self._residency_state("active", action=action)
+        logger.info(
+            "vLLM wake completed: active_version=%s action=%s",
+            state["active_weight_version"],
+            action,
+        )
+        return state
+
     def _config_for_weight(self, meta: WeightMeta) -> VllmBackendConfig:
         return self.config.model_copy(
             update={
@@ -249,6 +325,17 @@ class VllmRolloutBackend:
         if self._engine is None:
             raise VllmBackendError("vLLM engine has not been initialized")
         return self._engine
+
+    def _residency_state(self, residency: str, *, action: str) -> dict[str, Any]:
+        return {
+            "backend": "vllm",
+            "residency": residency,
+            "action": action,
+            "active_weight_version": None if self._active_weight is None else self._active_weight.version_id,
+            "has_engine": self._engine is not None,
+            "offloaded": self._offloaded,
+            "gpu_ids": list(self.config.gpu_ids),
+        }
 
     def _assert_rollout_lease(self, lease: GpuLease | Sequence[GpuLease]) -> None:
         leases = _lease_sequence(lease)
@@ -347,6 +434,41 @@ def _default_engine_factory(config: VllmBackendConfig, _meta: WeightMeta) -> Any
     if config.max_model_len is not None:
         kwargs["max_model_len"] = config.max_model_len
     return vllm.LLM(**kwargs)
+
+
+def _call_engine_sleep(engine: Any, *, level: int) -> bool:
+    for method_name in ("sleep", "offload"):
+        method = getattr(engine, method_name, None)
+        if method is None:
+            continue
+        for args, kwargs in (
+            ((), {"level": level}),
+            ((level,), {}),
+            ((), {}),
+        ):
+            try:
+                method(*args, **kwargs)
+                return True
+            except TypeError:
+                continue
+    return False
+
+
+def _call_engine_wake(engine: Any) -> bool:
+    for method_name in ("wake_up", "wake", "reload", "resume"):
+        method = getattr(engine, method_name, None)
+        if method is None:
+            continue
+        for args, kwargs in (
+            ((), {}),
+            ((), {"tags": ["weights", "kv_cache"]}),
+        ):
+            try:
+                method(*args, **kwargs)
+                return True
+            except TypeError:
+                continue
+    return False
 
 
 def _notify_engine_weight(engine: Any, meta: WeightMeta, *, transfer_source: WeightShardSource | None = None) -> None:

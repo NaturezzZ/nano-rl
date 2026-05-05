@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +52,14 @@ class FakeRayModule:
         self.fail_every_connect = fail_every_connect
         self.initialized = initialized
         self.init_calls: list[dict[str, Any]] = []
+        self.ray_dedup_log_values: list[str | None] = []
 
     def is_initialized(self) -> bool:
         return self.initialized
 
     def init(self, **kwargs: Any) -> object:
         self.init_calls.append(kwargs)
+        self.ray_dedup_log_values.append(os.environ.get("RAY_DEDUP_LOGS"))
         address = kwargs.get("address")
         if self.fail_every_connect and address:
             raise RuntimeError("connection failed")
@@ -194,6 +197,22 @@ def test_ray_cluster_controller_auto_connects_existing_cluster() -> None:
     assert result.startup_mode == "connected_existing"
     assert result.created_local_cluster is False
     assert ray.init_calls == [{"namespace": "nano-rl", "address": "auto", "logging_level": "warning"}]
+
+
+def test_ray_cluster_controller_can_disable_ray_log_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RAY_DEDUP_LOGS", raising=False)
+    ray = FakeRayModule()
+
+    RayClusterController(
+        namespace="nano-rl",
+        ray_address="auto",
+        node_custom_resources={"rollout_gpu_0": 1},
+        dedup_logs=False,
+        ray_module=ray,
+    ).ensure_initialized()
+
+    assert ray.ray_dedup_log_values == ["0"]
+    assert os.environ["RAY_DEDUP_LOGS"] == "0"
 
 
 def test_ray_cluster_controller_auto_falls_back_to_local_cluster(caplog: pytest.LogCaptureFixture) -> None:

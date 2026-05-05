@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib import import_module
 from itertools import cycle, islice
+import logging
 from typing import Any
 
 from nano_rl.config import LaunchConfig
@@ -14,6 +15,9 @@ from nano_rl.runtime.ray.launcher import RayActorGraph
 from nano_rl.runtime.roles import bootstrap_weight_meta
 from nano_rl.runtime.slot import RoleName, RolloutReplicaSpec, TrainerRankSpec
 from nano_rl.runtime.weight_transfer import WeightTransferPlanner
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,13 +35,13 @@ class PromptBatcher:
             raise RuntimeError("training data source produced no prompts")
         return cls(records=records)
 
-    def next_prompts(self, count: int) -> list[str]:
+    def next_records(self, count: int) -> list[PromptRecord]:
         if count < 1:
             raise ValueError("prompt batch count must be >= 1")
         iterator = cycle(self.records)
-        prompts = [record.prompt for record in islice(iterator, self._index, self._index + count)]
+        records = list(islice(iterator, self._index, self._index + count))
         self._index = (self._index + count) % len(self.records)
-        return prompts
+        return records
 
 
 class RayTrainingLoop:
@@ -62,6 +66,7 @@ class RayTrainingLoop:
         self.ray = ray_module or import_module("ray")
         self._trainer_states: dict[int, dict[str, object] | None] = {}
         self._last_weight_transfer_plan: dict[str, object] | None = None
+        self._rollout_active_weight_version: int | None = None
 
     def run(self) -> dict[str, object]:
         batch_size = self.launch_config.trainer.global_batch_size
@@ -77,9 +82,9 @@ class RayTrainingLoop:
         steps: list[dict[str, object]] = []
 
         for step_index in range(max_steps):
-            prompts = prompt_batcher.next_prompts(batch_size)
+            prompt_records = prompt_batcher.next_records(batch_size)
             rollout_result = self._run_rollout_step(
-                prompts,
+                prompt_records,
                 current_weight=current_weight,
                 controller_step=step_index,
             )
@@ -106,7 +111,7 @@ class RayTrainingLoop:
                 {
                     "step": step_index + 1,
                     "policy_version_before": rollout_result["policy_version"],
-                    "prompts_submitted": len(prompts),
+                    "prompts_submitted": len(prompt_records),
                     "samples_generated": rollout_result["generated_samples"],
                     "samples_accepted": rollout_result["accepted_samples"],
                     "train_batch_id": batch["train_batch_id"],
@@ -159,17 +164,17 @@ class RayTrainingLoop:
 
     def _run_rollout_step(
         self,
-        prompts: list[str],
+        prompt_records: list[PromptRecord],
         *,
         current_weight: dict[str, object],
         controller_step: int,
     ) -> dict[str, object]:
         policy_version = int(current_weight["version_id"])
-        self._call("rollout-manager", "enqueue_prompts", prompts)
+        self._call("rollout-manager", "enqueue_prompts", [_prompt_payload(record) for record in prompt_records])
 
         accepted_samples = 0
         generated_samples = 0
-        while accepted_samples < len(prompts):
+        while accepted_samples < len(prompt_records):
             queue_stats = self._call("sample-queue", "stats")
             output_depth = int(queue_stats["pending"]) + int(queue_stats["reserved_samples"])
             requests = self._call(
@@ -179,7 +184,7 @@ class RayTrainingLoop:
                 controller_step,
                 output_depth,
                 self.launch_config.control.queue_high_watermark,
-                len(prompts) - accepted_samples,
+                len(prompt_records) - accepted_samples,
             )
             if not requests:
                 break
@@ -231,23 +236,32 @@ class RayTrainingLoop:
         current_weight: dict[str, object],
         controller_step: int,
     ) -> dict[str, object]:
-        self._grant_train_window(controller_step)
-        trainer_leases = {
-            rank.rank: self._trainer_lease(rank)
-            for rank in self.launch_config.gpu_plan.trainer_ranks
-        }
+        trainer_leases: dict[int, dict[str, object]] = {}
+        trainers_offloaded = False
         try:
+            self._offload_shared_rollouts()
+            self._grant_train_window(controller_step)
+            trainer_leases = {
+                rank.rank: self._trainer_lease(rank)
+                for rank in self.launch_config.gpu_plan.trainer_ranks
+            }
             self._hydrate_trainers(trainer_leases)
-            train_stats = self._optimize_trainers(batch, trainer_leases)
-            exported = self._call("trainer-rank-0", "export_weight", current_weight)
-            registered = self._call("weight-registry", "register", exported)
-            self._offload_trainers(trainer_leases)
+            try:
+                train_stats = self._optimize_trainers(batch, trainer_leases)
+                exported = self._call("trainer-rank-0", "export_weight", current_weight)
+                registered = self._call("weight-registry", "register", exported)
+            finally:
+                self._offload_trainers(trainer_leases)
+                trainers_offloaded = True
             self._call("sample-queue", "ack_batch", batch["train_batch_id"])
         except Exception:
+            if trainer_leases and not trainers_offloaded:
+                self._offload_trainers_best_effort(trainer_leases)
             self._call("sample-queue", "release_batch", batch["train_batch_id"])
             raise
         finally:
             self._grant_rollout_window(controller_step)
+            self._wake_shared_rollouts()
 
         active = self._activate_weight_for_rollout(registered)
         return {"train_stats": train_stats, "active_weight": active}
@@ -287,8 +301,16 @@ class RayTrainingLoop:
         for rank, state in zip(self.launch_config.gpu_plan.trainer_ranks, states, strict=True):
             self._trainer_states[rank.rank] = state
 
+    def _offload_trainers_best_effort(self, leases: dict[int, dict[str, object]]) -> None:
+        try:
+            self._offload_trainers(leases)
+        except Exception:
+            logger.exception("best-effort trainer offload failed after train window error")
+
     def _activate_weight_for_rollout(self, meta: dict[str, object]) -> dict[str, object]:
         weight = WeightMeta.model_validate(meta)
+        if self._rollout_active_weight_version == weight.version_id:
+            return meta
         planner = WeightTransferPlanner(
             method=self.launch_config.weight_transfer.method,
             allow_rollout_only_artifact_pull=self.launch_config.weight_transfer.allow_rollout_only_artifact_pull,
@@ -310,12 +332,37 @@ class RayTrainingLoop:
                 source = transfer_plan.source_for_replica(replica.replica_id).model_dump(mode="json")
                 self._call(replica.replica_id, "activate_weight", meta, leases, source)
                 active = self._call("weight-registry", "ack_activation", weight.version_id, replica.replica_id)
+            self._rollout_active_weight_version = weight.version_id
             return active
         except Exception:
             self._call("weight-registry", "mark_failed", weight.version_id, "rollout activation failed")
             raise
         finally:
             self._call("rollout-manager", "resume")
+
+    def _offload_shared_rollouts(self) -> None:
+        refs = []
+        for replica in self._shared_rollout_replicas():
+            leases = self._rollout_leases_for_replica(replica)
+            refs.append(self.handles[replica.replica_id].offload.remote(leases))
+        if refs:
+            self._get(refs)
+
+    def _wake_shared_rollouts(self) -> None:
+        refs = []
+        for replica in self._shared_rollout_replicas():
+            leases = self._rollout_leases_for_replica(replica)
+            refs.append(self.handles[replica.replica_id].wake.remote(leases))
+        if refs:
+            self._get(refs)
+
+    def _shared_rollout_replicas(self) -> list[RolloutReplicaSpec]:
+        shared_gpu_ids = set(self.launch_config.gpu_plan.shared_gpu_ids)
+        return [
+            replica
+            for replica in self.launch_config.gpu_plan.rollout_replicas
+            if shared_gpu_ids.intersection(replica.gpu_ids)
+        ]
 
     def _grant_train_window(self, controller_step: int) -> None:
         for rank in self.launch_config.gpu_plan.trainer_ranks:
@@ -380,3 +427,11 @@ class RayTrainingLoop:
 
     def _get(self, value: Any) -> Any:
         return self.ray.get(value)
+
+
+def _prompt_payload(record: PromptRecord) -> dict[str, object]:
+    return {
+        "prompt_id": record.prompt_id,
+        "prompt": record.prompt,
+        "metadata": dict(record.metadata),
+    }

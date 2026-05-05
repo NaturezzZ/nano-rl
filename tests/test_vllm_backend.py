@@ -43,9 +43,17 @@ class FakeVllmEngine:
         self.initial_meta = meta
         self.activated: list[tuple[int, str, str | None]] = []
         self.generate_calls: list[dict[str, object]] = []
+        self.sleep_calls: list[int] = []
+        self.wake_calls = 0
 
     def activate_weight(self, meta: WeightMeta, *, transfer_source: WeightShardSource | None = None) -> None:
         self.activated.append((meta.version_id, meta.checksum, None if transfer_source is None else transfer_source.kind))
+
+    def sleep(self, level: int = 1) -> None:
+        self.sleep_calls.append(level)
+
+    def wake_up(self) -> None:
+        self.wake_calls += 1
 
     def generate(self, prompts, *, sampling_params=None, use_tqdm=False, metadata=None):
         prompt = prompts[0]
@@ -147,6 +155,34 @@ def test_backend_forwards_weight_transfer_source_to_engine() -> None:
 
     assert backend.active_weight_source == source
     assert engines[0].activated == [(6, "checksum", "shared_gpu_reshard")]
+
+
+def test_backend_offloads_and_wakes_vllm_engine_before_generate() -> None:
+    engines: list[FakeVllmEngine] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeVllmEngine:
+        engine = FakeVllmEngine(config, meta)
+        engines.append(engine)
+        return engine
+
+    backend = build_rollout_backend(
+        {"gpu_ids": (0,), "holder_id": "worker-0", "vllm_sleep_level": 2},
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+    backend.activate_weight(_weight(version_id=4), lease=lease)
+
+    offloaded = backend.offload(lease=lease)
+    with pytest.raises(Exception, match="offloaded"):
+        backend.generate(prompt="blocked", target_policy_version=4, request_metadata={}, lease=lease)
+    woken = backend.wake(lease=lease)
+    output = backend.generate(prompt="ready", target_policy_version=4, request_metadata={}, lease=lease)
+
+    assert offloaded["residency"] == "offloaded"
+    assert woken["residency"] == "active"
+    assert engines[0].sleep_calls == [2]
+    assert engines[0].wake_calls == 1
+    assert output.response == "ready -> fake"
 
 
 def test_fake_engine_output_converts_to_sample_record() -> None:

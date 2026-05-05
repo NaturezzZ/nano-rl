@@ -58,8 +58,9 @@ class Fsdp2TrainerBackend(TrainerBackend):
         modules = self._require_fsdp2()
         self._maybe_init_process_group(modules)
         self._ensure_model_and_optimizer(modules)
+        self._move_training_state_to_cpu(modules)
         self._initialized = True
-        state = self._state_bundle(residency="unloaded")
+        state = self._state_bundle(residency="cpu_standby")
         logger.info(
             "FSDP2 rank initialization completed: rank=%s group_epoch=%s comm_epoch=%s",
             self.config.rank,
@@ -84,6 +85,7 @@ class Fsdp2TrainerBackend(TrainerBackend):
             self._train_step = state.train_step
             self._weight_version = state.weight_version
         self._move_model_to_device(modules)
+        self._move_optimizer_state_to_device(self._device)
         self._hydrated = True
         hydrated = self._state_bundle(residency="cpu_standby")
         logger.info("FSDP2 hydrate completed: rank=%s residency=%s", self.config.rank, hydrated.residency)
@@ -213,10 +215,7 @@ class Fsdp2TrainerBackend(TrainerBackend):
         modules = self._require_fsdp2()
         if not self._initialized:
             raise BackendStateError(f"trainer rank {self.config.rank} has not been initialized")
-        if self._model is not None:
-            self._model.to("cpu")
-        if modules["torch"].cuda.is_available():
-            modules["torch"].cuda.empty_cache()
+        self._move_training_state_to_cpu(modules)
         self._hydrated = False
         state = self._state_bundle(residency="cpu_standby")
         logger.info("FSDP2 offload completed: rank=%s residency=%s", self.config.rank, state.residency)
@@ -345,6 +344,24 @@ class Fsdp2TrainerBackend(TrainerBackend):
             self._device = torch.device("cpu")
         self._model.to(self._device)
 
+    def _move_training_state_to_cpu(self, modules: dict[str, ModuleType]) -> None:
+        torch = modules["torch"]
+        self._device = torch.device("cpu")
+        if self._model is not None:
+            self._model.to(self._device)
+        self._move_optimizer_state_to_device("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _move_optimizer_state_to_device(self, device: Any) -> None:
+        if self._optimizer is None:
+            return
+        state = getattr(self._optimizer, "state", None)
+        if state is None:
+            return
+        for key, value in list(state.items()):
+            state[key] = _move_nested_value_to_device(value, device)
+
     def _torch_dtype(self, modules: dict[str, ModuleType]) -> Any:
         dtype = self.config.extra.get("mixed_precision")
         torch = modules["torch"]
@@ -432,6 +449,22 @@ def _sample_record_from_ref(value: Any) -> SampleRecord | None:
         except Exception as exc:
             raise BackendStateError("FSDP2 optimize received an invalid SampleRecord payload") from exc
     return None
+
+
+def _move_nested_value_to_device(value: Any, device: Any) -> Any:
+    if hasattr(value, "to"):
+        return value.to(device)
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            value[key] = _move_nested_value_to_device(item, device)
+        return value
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _move_nested_value_to_device(item, device)
+        return value
+    if isinstance(value, tuple):
+        return tuple(_move_nested_value_to_device(item, device) for item in value)
+    return value
 
 
 def _resolve_sample_ref_payload(value: Any) -> Any:

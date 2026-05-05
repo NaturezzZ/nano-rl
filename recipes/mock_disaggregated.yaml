@@ -19,6 +19,7 @@ runtime:
   ray:
     address: auto
     namespace: nano-rl-mock
+    dedup_logs: false
     gpu_manager:
       enabled: true
       lease_manager: true
@@ -76,6 +77,19 @@ data:
     template: "mock prompt {index}"
     start_index: 100
     shuffle: false
+  mock_profile:
+    enabled: true
+    sleep_enabled: true
+    prompt_length_distribution: chat_mixture
+    min_prompt_tokens: 24
+    mean_prompt_tokens: 384
+    max_prompt_tokens: 1536
+    length_jitter: 0.7
+    pad_prompts: true
+    load_base_ms: 3
+    load_ms_per_1k_tokens: 18
+    load_jitter_ms: 6
+    max_load_ms: 80
 
 algorithm:
   name: ppo
@@ -96,8 +110,19 @@ trainer:
 rollout:
   backend: mock
   mock:
-    response_template: "{prompt} :: mock-response@v{policy_version}"
-    max_response_tokens: 16
+    response_template: "mock-response@v{policy_version} prompt_tokens={prompt_tokens} response_tokens={response_token_count}: {response_body}"
+    max_response_tokens: 512
+    min_response_tokens: 16
+    mean_response_tokens: 96
+    response_length_distribution: lognormal
+    response_length_jitter: 0.75
+    max_sequence_tokens: 4096
+    prefill_base_ms: 4
+    prefill_ms_per_1k_tokens: 32
+    decode_base_ms: 4
+    decode_ms_per_token: 2.5
+    latency_jitter_ms: 20
+    max_sample_sleep_ms: 1200
     include_policy_segments: true
   partial_rollout:
     enabled: true

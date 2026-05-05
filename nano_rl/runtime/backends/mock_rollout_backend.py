@@ -12,6 +12,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 import hashlib
 import json
+import math
+import random
+import time
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,6 +42,17 @@ class MockRolloutBackendConfig(BaseModel):
     response_template: str | None = None
     tokenization: str = "sha256_bytes"
     max_response_tokens: int = Field(default=16, ge=1)
+    min_response_tokens: int = Field(default=1, ge=1)
+    mean_response_tokens: int = Field(default=16, ge=1)
+    response_length_distribution: str = "fixed"
+    response_length_jitter: float = Field(default=0.65, ge=0)
+    max_sequence_tokens: int = Field(default=4096, ge=2)
+    prefill_base_ms: float = Field(default=0, ge=0)
+    prefill_ms_per_1k_tokens: float = Field(default=0, ge=0)
+    decode_base_ms: float = Field(default=0, ge=0)
+    decode_ms_per_token: float = Field(default=0, ge=0)
+    latency_jitter_ms: float = Field(default=0, ge=0)
+    max_sample_sleep_ms: float = Field(default=20000, ge=0)
     logprob_mode: str = "linear"
     finish_reason: str = "stop"
     include_policy_segments: bool = False
@@ -67,6 +81,14 @@ class MockRolloutBackendConfig(BaseModel):
             )
         if self.gpu_ids and self.holder_ids and len(self.holder_ids) != len(self.gpu_ids):
             raise ValueError("holder_ids length must match gpu_ids length")
+        if self.response_length_distribution not in {"fixed", "uniform", "lognormal", "chat_mixture"}:
+            raise ValueError("response_length_distribution must be fixed, uniform, lognormal, or chat_mixture")
+        if self.min_response_tokens > self.max_response_tokens:
+            raise ValueError("min_response_tokens must be <= max_response_tokens")
+        if self.mean_response_tokens > self.max_response_tokens:
+            raise ValueError("mean_response_tokens must be <= max_response_tokens")
+        if self.max_response_tokens >= self.max_sequence_tokens:
+            raise ValueError("max_response_tokens must be smaller than max_sequence_tokens")
         return self
 
     @property
@@ -84,6 +106,7 @@ class MockRolloutBackend:
         self._active_weight: WeightMeta | None = None
         self._active_weight_source: WeightShardSource | None = None
         self._activation_count = 0
+        self._offloaded = False
 
     @property
     def active_weight(self) -> WeightMeta | None:
@@ -108,6 +131,7 @@ class MockRolloutBackend:
         self._active_weight = meta
         self._active_weight_source = transfer_source
         self._activation_count += 1
+        self._offloaded = False
 
     def generate(
         self,
@@ -121,16 +145,20 @@ class MockRolloutBackend:
         leases = self._assert_rollout_lease(lease)
         if self._active_weight is None:
             raise MockRolloutBackendError("cannot generate before activate_weight")
+        if self._offloaded:
+            raise MockRolloutBackendError("mock rollout backend is offloaded; wake it before generate")
         if self._active_weight.version_id != target_policy_version:
             raise MockRolloutBackendError(
                 f"active weight version {self._active_weight.version_id} does not match target {target_policy_version}"
             )
 
         metadata = dict(request_metadata or {})
+        prompt_tokens = _coerce_prompt_tokens(metadata.get("prompt_tokens"), prompt)
         seed_payload = _stable_payload(
             {
                 "seed": self.config.seed,
                 "prompt": prompt,
+                "prompt_tokens": prompt_tokens,
                 "request_id": request_id,
                 "request_metadata": metadata,
                 "weight_version": self._active_weight.version_id,
@@ -139,30 +167,48 @@ class MockRolloutBackend:
             }
         )
         digest = hashlib.sha256(seed_payload).hexdigest()
+        max_tokens = min(self._max_tokens(), max(1, self.config.max_sequence_tokens - prompt_tokens))
+        response_token_count = self._response_token_count(seed_payload, max_tokens=max_tokens)
+        response_body = _deterministic_response_body(seed_payload, response_token_count)
         if self.config.response_template is None:
             response = f"{self.config.response_prefix}[v{self._active_weight.version_id}:{digest[:12]}] {prompt}"
         else:
             response = _render_response(
                 self.config.response_template,
                 prompt=prompt,
+                prompt_tokens=prompt_tokens,
+                response_body=response_body,
+                response_token_count=response_token_count,
                 policy_version=target_policy_version,
                 active_weight=self._active_weight,
                 request_id=request_id,
                 digest=digest,
             )
-        tokens = _deterministic_tokens(seed_payload, self._max_tokens())
-        logprobs = _deterministic_logprobs(tokens)
+        tokens = _deterministic_tokens(seed_payload, response_token_count)
+        logprobs = _deterministic_logprobs(tokens, mode=self.config.logprob_mode)
+        latency = self._latency(prompt_tokens=prompt_tokens, response_tokens=response_token_count, seed_payload=seed_payload)
+        if latency["total_sleep_ms"] > 0:
+            time.sleep(latency["total_sleep_ms"] / 1000.0)
+        metadata["prompt_tokens"] = prompt_tokens
         metadata["backend"] = "mock"
         metadata["mock_rollout"] = {
             "backend": "mock_rollout",
             "active_weight_version": self._active_weight.version_id,
             "activation_count": self._activation_count,
+            "prompt_tokens": prompt_tokens,
+            "response_tokens": response_token_count,
+            "max_sequence_tokens": self.config.max_sequence_tokens,
+            "response_length_distribution": self.config.response_length_distribution,
             "gpu_ids": [item.gpu_id for item in leases],
             "holder_ids": [item.holder_id for item in leases],
             "lease_epochs": {str(item.gpu_id): item.lease_epoch for item in leases},
             "digest": digest,
             "tokenization": self.config.tokenization,
             "logprob_mode": self.config.logprob_mode,
+            "prefill_sleep_ms": latency["prefill_sleep_ms"],
+            "decode_sleep_ms": latency["decode_sleep_ms"],
+            "latency_jitter_ms": latency["latency_jitter_ms"],
+            "total_sleep_ms": latency["total_sleep_ms"],
         }
         if self.config.include_policy_segments:
             metadata["policy_segments"] = [
@@ -187,6 +233,26 @@ class MockRolloutBackend:
             metadata=metadata,
         )
 
+    def offload(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, object]:
+        self._assert_rollout_lease(lease)
+        self._offloaded = True
+        return self._residency_state("offloaded", action="mock_offload")
+
+    def wake(self, *, lease: GpuLease | Sequence[GpuLease]) -> dict[str, object]:
+        self._assert_rollout_lease(lease)
+        self._offloaded = False
+        return self._residency_state("active", action="mock_wake")
+
+    def _residency_state(self, residency: str, *, action: str) -> dict[str, object]:
+        return {
+            "backend": "mock",
+            "residency": residency,
+            "action": action,
+            "active_weight_version": None if self._active_weight is None else self._active_weight.version_id,
+            "offloaded": self._offloaded,
+            "gpu_ids": list(self.config.gpu_ids),
+        }
+
     def _max_tokens(self) -> int:
         raw_value = self.config.sampling_params.get("max_tokens", self.config.max_response_tokens)
         try:
@@ -196,6 +262,48 @@ class MockRolloutBackend:
         if value < 1:
             raise MockRolloutBackendError("mock rollout max_tokens must be >= 1")
         return value
+
+    def _response_token_count(self, seed_payload: bytes, *, max_tokens: int) -> int:
+        cap = max(1, min(max_tokens, self.config.max_response_tokens))
+        minimum = min(self.config.min_response_tokens, cap)
+        if self.config.response_length_distribution == "fixed":
+            return cap
+
+        rng = _stable_rng(seed_payload + b":response-length")
+        if self.config.response_length_distribution == "uniform":
+            raw = rng.randint(minimum, cap)
+        elif self.config.response_length_distribution == "lognormal":
+            raw = int(
+                round(
+                    rng.lognormvariate(
+                        math.log(max(minimum, self.config.mean_response_tokens)),
+                        max(0.01, self.config.response_length_jitter),
+                    )
+                )
+            )
+        elif self.config.response_length_distribution == "chat_mixture":
+            raw = _sample_chat_mixture_response_tokens(self.config, rng, minimum=minimum, cap=cap)
+        else:
+            raw = cap
+        return max(minimum, min(cap, int(raw)))
+
+    def _latency(self, *, prompt_tokens: int, response_tokens: int, seed_payload: bytes) -> dict[str, float]:
+        prefill_ms = self.config.prefill_base_ms + (prompt_tokens / 1000.0) * self.config.prefill_ms_per_1k_tokens
+        decode_ms = self.config.decode_base_ms + response_tokens * self.config.decode_ms_per_token
+        jitter_ms = 0.0
+        if self.config.latency_jitter_ms > 0:
+            jitter_ms = _stable_rng(seed_payload + b":latency").uniform(0, self.config.latency_jitter_ms)
+        total_ms = prefill_ms + decode_ms + jitter_ms
+        if self.config.max_sample_sleep_ms > 0:
+            total_ms = min(total_ms, self.config.max_sample_sleep_ms)
+        else:
+            total_ms = 0.0
+        return {
+            "prefill_sleep_ms": round(prefill_ms, 3),
+            "decode_sleep_ms": round(decode_ms, 3),
+            "latency_jitter_ms": round(jitter_ms, 3),
+            "total_sleep_ms": round(max(0.0, total_ms), 3),
+        }
 
     def _assert_rollout_lease(self, lease: GpuLease | Sequence[GpuLease]) -> tuple[GpuLease, ...]:
         leases = _lease_sequence(lease)
@@ -275,6 +383,9 @@ def _render_response(
     template: str | None,
     *,
     prompt: str,
+    prompt_tokens: int,
+    response_body: str,
+    response_token_count: int,
     policy_version: int,
     active_weight: WeightMeta,
     request_id: str | None,
@@ -285,6 +396,9 @@ def _render_response(
     try:
         return template.format(
             prompt=prompt,
+            prompt_tokens=prompt_tokens,
+            response_body=response_body,
+            response_token_count=response_token_count,
             policy_version=policy_version,
             target_policy_version=policy_version,
             version_id=active_weight.version_id,
@@ -310,5 +424,59 @@ def _deterministic_tokens(seed_payload: bytes, count: int) -> list[int]:
     return tokens
 
 
-def _deterministic_logprobs(tokens: Sequence[int]) -> list[float]:
+def _deterministic_logprobs(tokens: Sequence[int], *, mode: str) -> list[float]:
+    if mode == "constant":
+        return [-0.5 for _ in tokens]
     return [-round(((token % 1000) + 1) / 1000, 3) for token in tokens]
+
+
+def _deterministic_response_body(seed_payload: bytes, count: int) -> str:
+    words: list[str] = []
+    block = seed_payload + b":response-body"
+    while len(words) < count:
+        digest = hashlib.sha256(block).hexdigest()
+        for index in range(0, len(digest), 8):
+            if len(words) >= count:
+                break
+            words.append(f"tok_{digest[index:index + 8]}")
+        block = digest.encode("utf-8")
+    return " ".join(words)
+
+
+def _sample_chat_mixture_response_tokens(
+    config: MockRolloutBackendConfig,
+    rng: random.Random,
+    *,
+    minimum: int,
+    cap: int,
+) -> int:
+    draw = rng.random()
+    if draw < 0.60:
+        low = minimum
+        high = max(low, min(cap, config.mean_response_tokens))
+    elif draw < 0.90:
+        low = max(minimum, config.mean_response_tokens // 2)
+        high = max(low, min(cap, config.mean_response_tokens * 2))
+    elif draw < 0.98:
+        low = max(minimum, config.mean_response_tokens)
+        high = max(low, min(cap, config.mean_response_tokens * 4))
+    else:
+        low = max(minimum, cap // 2)
+        high = cap
+    return rng.randint(low, high)
+
+
+def _coerce_prompt_tokens(value: Any, prompt: str) -> int:
+    if value is not None:
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return count
+    return max(1, len(prompt.strip().split()))
+
+
+def _stable_rng(seed_payload: bytes) -> random.Random:
+    seed = int.from_bytes(hashlib.sha256(seed_payload).digest()[:8], "big")
+    return random.Random(seed)

@@ -195,7 +195,8 @@ class MockTrainerBackend(TrainerBackend):
 
     def initialize_rank(self) -> TrainStateBundle:
         self._initialized = True
-        return self._state_bundle(residency="unloaded")
+        self._gpu_resident = False
+        return self._state_bundle(residency="cpu_standby")
 
     def hydrate(self, state: TrainStateBundle | None = None, *, lease: GpuLease) -> TrainStateBundle:
         self._assert_trainer_lease(lease)

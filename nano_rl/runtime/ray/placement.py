@@ -131,6 +131,10 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "sampling_params": config.rollout.vllm.sampling_params,
                         "gpu_ids": list(replica.gpu_ids),
                         "holder_ids": list(replica.worker_ids),
+                        "offload_strategy": config.runtime.ray.gpu_manager.hybrid_toggle.offload.rollout_engine,
+                        "vllm_sleep_level": (
+                            config.runtime.ray.gpu_manager.hybrid_toggle.offload.vllm_sleep_level or 2
+                        ),
                         "mock": config.rollout.mock.model_dump(mode="json"),
                     },
                     config.reward.model_dump(mode="json"),

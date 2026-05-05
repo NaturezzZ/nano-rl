@@ -117,7 +117,7 @@ def build_rollout_manager_actor_class():
             )
             logger.info("RolloutManagerActor init completed")
 
-        def enqueue_prompts(self, prompts: list[str]) -> int:
+        def enqueue_prompts(self, prompts: list[object]) -> int:
             return self._core.enqueue_prompts(prompts)
 
         def pause_for_weight(self, reason: str) -> None:
@@ -272,6 +272,40 @@ def build_rollout_replica_controller_actor_class():
                 sample.sample_id,
             )
             return sample.model_dump(mode="json")
+
+        def offload(self, leases: list[dict[str, object]]) -> dict[str, object] | None:
+            logger.info(
+                "RolloutReplicaControllerActor offload started: replica_id=%s lease_count=%s",
+                self._role.replica_id,
+                len(leases),
+            )
+            parsed_leases = tuple(GpuLease.model_validate(lease) for lease in leases)
+            state = None
+            if self._backend is not None:
+                state = self._backend.offload(lease=parsed_leases)
+            logger.info(
+                "RolloutReplicaControllerActor offload completed: replica_id=%s state=%s",
+                self._role.replica_id,
+                None if state is None else state.get("residency"),
+            )
+            return state
+
+        def wake(self, leases: list[dict[str, object]]) -> dict[str, object] | None:
+            logger.info(
+                "RolloutReplicaControllerActor wake started: replica_id=%s lease_count=%s",
+                self._role.replica_id,
+                len(leases),
+            )
+            parsed_leases = tuple(GpuLease.model_validate(lease) for lease in leases)
+            state = None
+            if self._backend is not None:
+                state = self._backend.wake(lease=parsed_leases)
+            logger.info(
+                "RolloutReplicaControllerActor wake completed: replica_id=%s state=%s",
+                self._role.replica_id,
+                None if state is None else state.get("residency"),
+            )
+            return state
 
         def state(self) -> dict[str, object]:
             backend_active_weight = None if self._backend is None else getattr(self._backend, "active_weight", None)

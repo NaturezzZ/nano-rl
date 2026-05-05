@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import cycle
+from typing import Any
 from uuid import uuid4
 
 from nano_rl.exceptions import NanoRLError
@@ -23,6 +25,12 @@ class GenerationRequest:
     replica_id: str
     prompt: str
     target_policy_version: int
+    metadata: dict[str, object]
+
+
+@dataclass(frozen=True)
+class QueuedPrompt:
+    prompt: str
     metadata: dict[str, object]
 
 
@@ -48,7 +56,7 @@ class RolloutManagerCore:
             raise CoordinatorError("max_in_flight_per_replica must be >= 1")
         self._replica_cycle = cycle(self.replica_ids)
         self._max_in_flight_per_replica = max_in_flight_per_replica
-        self._input_backlog: deque[str] = deque()
+        self._input_backlog: deque[QueuedPrompt] = deque()
         self._paused_reason: str | None = None
         self._in_flight: dict[str, GenerationRequest] = {}
 
@@ -62,14 +70,14 @@ class RolloutManagerCore:
     def resume(self) -> None:
         self._paused_reason = None
 
-    def enqueue_prompts(self, prompts: list[str]) -> int:
+    def enqueue_prompts(self, prompts: list[str | Mapping[str, Any]]) -> int:
         for prompt in prompts:
-            self._input_backlog.append(prompt)
+            self._input_backlog.append(_coerce_queued_prompt(prompt))
         return len(self._input_backlog)
 
     def dispatch_prompts(
         self,
-        prompts: list[str],
+        prompts: list[str | Mapping[str, Any]],
         *,
         target_policy_version: int,
         controller_step: int,
@@ -78,7 +86,8 @@ class RolloutManagerCore:
             raise CoordinatorError(f"rollout manager is paused: {self._paused_reason}")
         requests: list[GenerationRequest] = []
         for prompt in prompts:
-            request = self._build_request(prompt, target_policy_version, controller_step)
+            queued = _coerce_queued_prompt(prompt)
+            request = self._build_request(queued, target_policy_version, controller_step)
             requests.append(request)
         return requests
 
@@ -140,7 +149,7 @@ class RolloutManagerCore:
 
     def _build_request(
         self,
-        prompt: str,
+        prompt: QueuedPrompt,
         target_policy_version: int,
         controller_step: int,
         *,
@@ -150,9 +159,9 @@ class RolloutManagerCore:
         request = GenerationRequest(
             request_id=f"rollout-{uuid4().hex}",
             replica_id=replica_id,
-            prompt=prompt,
+            prompt=prompt.prompt,
             target_policy_version=target_policy_version,
-            metadata={"controller_step": controller_step},
+            metadata={**prompt.metadata, "controller_step": controller_step},
         )
         self._in_flight[request.request_id] = request
         return request
@@ -210,3 +219,26 @@ class TrainerCoordinatorCore:
             "world_size": self.world_size,
             "rank_assignments": [assignment.__dict__ for assignment in self.rank_assignments],
         }
+
+
+def _coerce_queued_prompt(value: str | Mapping[str, Any]) -> QueuedPrompt:
+    if isinstance(value, str):
+        return QueuedPrompt(prompt=value, metadata={})
+    if not isinstance(value, Mapping):
+        raise CoordinatorError("rollout prompts must be strings or mappings")
+    raw_prompt = value.get("prompt")
+    if not isinstance(raw_prompt, str):
+        raise CoordinatorError("rollout prompt mapping requires a string 'prompt'")
+    raw_metadata = value.get("metadata", {})
+    if raw_metadata is None:
+        raw_metadata = {}
+    if not isinstance(raw_metadata, Mapping):
+        raise CoordinatorError("rollout prompt mapping metadata must be an object")
+    metadata = dict(raw_metadata)
+    prompt_id = value.get("prompt_id", value.get("id"))
+    if prompt_id is not None:
+        metadata.setdefault("prompt_id", str(prompt_id))
+    for key, item in value.items():
+        if key not in {"prompt", "metadata", "prompt_id", "id"}:
+            metadata.setdefault(str(key), item)
+    return QueuedPrompt(prompt=raw_prompt, metadata=metadata)

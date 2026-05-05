@@ -114,6 +114,7 @@ class RayDriver:
             namespace=self.launch_config.runtime.ray.namespace,
             actor_class_builders=actor_class_builders,
             ray_address=self.launch_config.runtime.ray.address,
+            dedup_logs=self.launch_config.runtime.ray.dedup_logs,
         )
         return launcher.start(dry_run=dry_run)
 
@@ -130,6 +131,7 @@ class RayDriver:
             actor_class_builders=actor_class_builders,
             ray_address=self.launch_config.runtime.ray.address,
             start_ray=start_ray,
+            dedup_logs=self.launch_config.runtime.ray.dedup_logs,
         )
         return launcher.start(dry_run=False)
 

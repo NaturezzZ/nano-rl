@@ -62,6 +62,7 @@ class RayActorGraphLauncher:
     actor_class_builders: Mapping[str, RemoteActorClassBuilder] | None = None
     start_ray: bool = False
     ray_address: str | None = None
+    dedup_logs: bool = True
     ray_module: Any | None = None
     _handles: dict[str, Any] = field(default_factory=dict, init=False)
     _ray_cluster: RayClusterStartupResult | None = field(default=None, init=False)
@@ -195,6 +196,7 @@ class RayActorGraphLauncher:
             ray_address=self.ray_address,
             node_custom_resources=self.launch_plan.node_custom_resources,
             node_num_cpus=self.launch_plan.node_num_cpus,
+            dedup_logs=self.dedup_logs,
             ray_module=self.ray_module,
         ).ensure_initialized()
 

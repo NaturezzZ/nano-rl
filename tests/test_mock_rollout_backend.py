@@ -165,6 +165,46 @@ def test_mock_rollout_config_accepts_vllm_backend_config_without_importing_vllm(
     assert output.tokens and len(output.tokens) == 2
 
 
+def test_mock_rollout_samples_response_length_distribution_and_latency_metadata() -> None:
+    backend = build_mock_rollout_backend(
+        {
+            "gpu_ids": (0,),
+            "holder_id": "worker-0",
+            "response_template": "answer {response_token_count}/{prompt_tokens}: {response_body}",
+            "response_length_distribution": "uniform",
+            "min_response_tokens": 4,
+            "mean_response_tokens": 8,
+            "max_response_tokens": 16,
+            "max_sequence_tokens": 64,
+            "prefill_base_ms": 1,
+            "prefill_ms_per_1k_tokens": 10,
+            "decode_base_ms": 2,
+            "decode_ms_per_token": 0,
+            "latency_jitter_ms": 0,
+            "max_sample_sleep_ms": 0,
+        }
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+    backend.activate_weight(_weight(version_id=5), lease=lease)
+
+    output = backend.generate(
+        prompt="one two three",
+        target_policy_version=5,
+        request_metadata={"prompt_tokens": 3},
+        request_id="req-dist",
+        lease=lease,
+    )
+
+    assert 4 <= len(output.tokens) <= 16
+    assert len(output.logprobs) == len(output.tokens)
+    assert f"answer {len(output.tokens)}/3:" in output.response
+    assert output.metadata["prompt_tokens"] == 3
+    assert output.metadata["mock_rollout"]["response_tokens"] == len(output.tokens)
+    assert output.metadata["mock_rollout"]["prefill_sleep_ms"] == 1.03
+    assert output.metadata["mock_rollout"]["decode_sleep_ms"] == 2
+    assert output.metadata["mock_rollout"]["total_sleep_ms"] == 0
+
+
 def test_mock_rollout_rejects_mismatched_holder_ids_length() -> None:
     with pytest.raises(ValueError, match="holder_ids length must match gpu_ids length"):
         MockRolloutBackendConfig.model_validate(

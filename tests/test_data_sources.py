@@ -88,6 +88,38 @@ def test_mock_generated_without_shuffle_keeps_index_order() -> None:
     ]
 
 
+def test_mock_profile_shapes_prompt_tokens_and_loader_metadata() -> None:
+    source = build_prompt_source(
+        {
+            "source_type": "mock_generated",
+            "mock_profile": {
+                "enabled": True,
+                "sleep_enabled": False,
+                "prompt_length_distribution": "uniform",
+                "min_prompt_tokens": 12,
+                "mean_prompt_tokens": 16,
+                "max_prompt_tokens": 24,
+                "pad_prompts": True,
+                "load_base_ms": 3,
+                "load_ms_per_1k_tokens": 10,
+                "max_load_ms": 10,
+            },
+            "mock_generated": {
+                "count": 2,
+                "template": "prompt {index}",
+            },
+        }
+    )
+
+    records = list(source.iter_prompts())
+
+    assert len(records) == 2
+    assert all(12 <= record.metadata["prompt_tokens"] <= 24 for record in records)
+    assert all(record.metadata["mock_data"]["source_type"] == "mock_generated" for record in records)
+    assert all(record.metadata["mock_data"]["target_prompt_tokens"] >= 12 for record in records)
+    assert all(record.prompt.startswith("prompt ") for record in records)
+
+
 def test_mock_jsonl_reads_prompt_column_and_preserves_metadata(tmp_path) -> None:
     path = tmp_path / "prompts.jsonl"
     path.write_text(

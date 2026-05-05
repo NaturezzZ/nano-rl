@@ -98,6 +98,10 @@ properties:
           namespace:
             type: string
             minLength: 1
+          dedup_logs:
+            type: boolean
+            default: false
+            description: When false, set RAY_DEDUP_LOGS=0 before Ray is imported or initialized so per-rank actor logs are not collapsed into Ray repeated-line summaries.
           gpu_manager:
             type: object
             required: [enabled, lease_manager, topology, role_classes, hybrid_toggle]
@@ -243,6 +247,25 @@ properties:
         type: object
         properties:
           encoding: { type: string, default: utf-8 }
+      mock_profile:
+        type: object
+        description: Optional mock-only prompt length and loader latency profile.
+        properties:
+          enabled: { type: boolean, default: false }
+          sleep_enabled: { type: boolean, default: false }
+          prompt_length_distribution:
+            type: string
+            enum: [fixed, uniform, lognormal, chat_mixture]
+            default: fixed
+          min_prompt_tokens: { type: integer, minimum: 1, default: 1 }
+          mean_prompt_tokens: { type: integer, minimum: 1, default: 64 }
+          max_prompt_tokens: { type: integer, minimum: 1, default: 512 }
+          length_jitter: { type: number, minimum: 0, default: 0.65 }
+          pad_prompts: { type: boolean, default: false }
+          load_base_ms: { type: number, minimum: 0, default: 0 }
+          load_ms_per_1k_tokens: { type: number, minimum: 0, default: 0 }
+          load_jitter_ms: { type: number, minimum: 0, default: 0 }
+          max_load_ms: { type: number, minimum: 0, default: 0 }
     allOf:
       - if:
           properties:
@@ -322,6 +345,20 @@ properties:
           response_template: { type: string, default: "{prompt} :: response@v{policy_version}" }
           tokenization: { type: string, enum: [sha256_bytes, whitespace_hash], default: sha256_bytes }
           max_response_tokens: { type: integer, minimum: 1, default: 16 }
+          min_response_tokens: { type: integer, minimum: 1, default: 1 }
+          mean_response_tokens: { type: integer, minimum: 1, default: 16 }
+          response_length_distribution:
+            type: string
+            enum: [fixed, uniform, lognormal, chat_mixture]
+            default: fixed
+          response_length_jitter: { type: number, minimum: 0, default: 0.65 }
+          max_sequence_tokens: { type: integer, minimum: 2, default: 4096 }
+          prefill_base_ms: { type: number, minimum: 0, default: 0 }
+          prefill_ms_per_1k_tokens: { type: number, minimum: 0, default: 0 }
+          decode_base_ms: { type: number, minimum: 0, default: 0 }
+          decode_ms_per_token: { type: number, minimum: 0, default: 0 }
+          latency_jitter_ms: { type: number, minimum: 0, default: 0 }
+          max_sample_sleep_ms: { type: number, minimum: 0, default: 20000 }
           logprob_mode: { type: string, enum: [linear, constant], default: linear }
           finish_reason: { type: string, default: stop }
           include_policy_segments: { type: boolean, default: false }

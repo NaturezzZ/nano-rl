@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 import warnings
 from typing import Any, Mapping
 
@@ -47,9 +48,11 @@ class RayClusterController:
     ray_address: str | None
     node_custom_resources: Mapping[str, float]
     node_num_cpus: int | None = None
+    dedup_logs: bool = True
     ray_module: Any | None = None
 
     def ensure_initialized(self) -> RayClusterStartupResult:
+        self._configure_log_dedup_env()
         ray = self._ray_module()
         address = self._normalized_address()
 
@@ -191,6 +194,10 @@ class RayClusterController:
                 module=r"ray\._private\.worker",
             )
             ray.init(**kwargs)
+
+    def _configure_log_dedup_env(self) -> None:
+        if not self.dedup_logs:
+            os.environ["RAY_DEDUP_LOGS"] = "0"
 
 
 def _format_exception(exc: Exception) -> str:

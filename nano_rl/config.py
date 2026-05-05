@@ -214,6 +214,7 @@ class PlacementConfig(BaseModel):
 class RayConfig(BaseModel):
     address: str
     namespace: str
+    dedup_logs: bool = False
     gpu_manager: GpuManagerConfig
     placement: PlacementConfig
 
@@ -269,6 +270,29 @@ class MockJsonlDataConfig(BaseModel):
     encoding: str = "utf-8"
 
 
+class MockDataProfileConfig(BaseModel):
+    enabled: bool = False
+    sleep_enabled: bool = False
+    prompt_length_distribution: Literal["fixed", "uniform", "lognormal", "chat_mixture"] = "fixed"
+    min_prompt_tokens: int = Field(default=1, ge=1)
+    mean_prompt_tokens: int = Field(default=64, ge=1)
+    max_prompt_tokens: int = Field(default=512, ge=1)
+    length_jitter: float = Field(default=0.65, ge=0)
+    pad_prompts: bool = False
+    load_base_ms: float = Field(default=0, ge=0)
+    load_ms_per_1k_tokens: float = Field(default=0, ge=0)
+    load_jitter_ms: float = Field(default=0, ge=0)
+    max_load_ms: float = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_lengths(self) -> "MockDataProfileConfig":
+        if self.min_prompt_tokens > self.max_prompt_tokens:
+            raise ValueError("data.mock_profile.min_prompt_tokens must be <= max_prompt_tokens")
+        if self.mean_prompt_tokens > self.max_prompt_tokens:
+            raise ValueError("data.mock_profile.mean_prompt_tokens must be <= max_prompt_tokens")
+        return self
+
+
 class DataConfig(BaseModel):
     source_type: SourceType
     data_path: str | None = None
@@ -276,6 +300,7 @@ class DataConfig(BaseModel):
     mock_inline: MockInlineDataConfig | None = None
     mock_generated: MockGeneratedDataConfig | None = None
     mock_jsonl: MockJsonlDataConfig | None = None
+    mock_profile: MockDataProfileConfig = Field(default_factory=MockDataProfileConfig)
 
     @model_validator(mode="after")
     def _validate_source_fields(self) -> "DataConfig":
@@ -367,10 +392,31 @@ class MockRolloutConfig(BaseModel):
     response_template: str = "{prompt} :: response@v{policy_version}"
     tokenization: Literal["sha256_bytes", "whitespace_hash"] = "sha256_bytes"
     max_response_tokens: int = Field(default=16, ge=1)
+    min_response_tokens: int = Field(default=1, ge=1)
+    mean_response_tokens: int = Field(default=16, ge=1)
+    response_length_distribution: Literal["fixed", "uniform", "lognormal", "chat_mixture"] = "fixed"
+    response_length_jitter: float = Field(default=0.65, ge=0)
+    max_sequence_tokens: int = Field(default=4096, ge=2)
+    prefill_base_ms: float = Field(default=0, ge=0)
+    prefill_ms_per_1k_tokens: float = Field(default=0, ge=0)
+    decode_base_ms: float = Field(default=0, ge=0)
+    decode_ms_per_token: float = Field(default=0, ge=0)
+    latency_jitter_ms: float = Field(default=0, ge=0)
+    max_sample_sleep_ms: float = Field(default=20000, ge=0)
     logprob_mode: Literal["linear", "constant"] = "linear"
     finish_reason: str = "stop"
     include_policy_segments: bool = False
     seed: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_mock_rollout_distribution(self) -> "MockRolloutConfig":
+        if self.min_response_tokens > self.max_response_tokens:
+            raise ValueError("rollout.mock.min_response_tokens must be <= max_response_tokens")
+        if self.mean_response_tokens > self.max_response_tokens:
+            raise ValueError("rollout.mock.mean_response_tokens must be <= max_response_tokens")
+        if self.max_response_tokens >= self.max_sequence_tokens:
+            raise ValueError("rollout.mock.max_response_tokens must be smaller than max_sequence_tokens")
+        return self
 
 
 class RolloutConfig(BaseModel):

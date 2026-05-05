@@ -445,7 +445,7 @@
         </div>
         <div class="box">
           <h3>Execution backends</h3>
-          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter，<code>RayTrainingLoop</code> 会在 graph 启动后串接 rollout、reward、sample queue、trainer、weight registry 和 weight activation。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph 并执行训练循环。</p>
+          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter，<code>RayTrainingLoop</code> 会在 graph 启动后串接 rollout、reward、sample queue、trainer、weight registry、weight activation，以及 shared GPU train window 前后的 rollout offload/wake 和 trainer CPU standby。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph 并执行训练循环。</p>
         </div>
       </div>
     </section>
@@ -740,7 +740,7 @@
         </div>
         <div class="box">
           <h3>FSDP2 Trainer</h3>
-          <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 已接入 <code>Fsdp2TrainerBackend</code> adapter。真实 FSDP2 执行依赖可加载模型、<code>trainer.checkpoint_dir</code> 与多 rank rendezvous/store endpoint；queue ack 必须晚于 optimizer step 成功。</p>
+          <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 已接入 <code>Fsdp2TrainerBackend</code> adapter。真实 FSDP2 执行依赖可加载模型、<code>trainer.checkpoint_dir</code> 与多 rank rendezvous/store endpoint；rank 初始化后和每轮 train 后都应处于 CPU standby，queue ack 必须晚于 optimizer step 与 trainer offload 成功。</p>
         </div>
         <div class="box">
           <h3>vLLM Rollout</h3>
