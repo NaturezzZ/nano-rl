@@ -19,8 +19,9 @@ accelerate==1.7.0
 sentencepiece==0.2.0
 
 # FSDP2 is part of PyTorch; there is no standalone fsdp2 package.
-# vLLM 0.8.5 has day-zero Qwen3 support and expects a newer torch stack.
+# vLLM native Weight Transfer is required so each train step can sync updated
+# policy weights into the rollout engine before the next rollout window.
 torch==2.6.0
-vllm==0.8.5; platform_system == "Linux"
+vllm>=0.20.1; platform_system == "Linux"
 
 pytest==8.3.5

@@ -7,6 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 from importlib import import_module
 import logging
+import socket
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -229,6 +230,207 @@ class Fsdp2TrainerBackend(TrainerBackend):
             exported.checksum,
         )
         return exported
+
+    def sync_weights_to_vllm(
+        self,
+        *,
+        rollout_handle: Any,
+        meta: WeightMeta,
+        transfer_source: Mapping[str, Any] | None,
+        lease: GpuLease,
+        transport: str = "ipc",
+        is_checkpoint_format: bool = True,
+    ) -> dict[str, Any]:
+        """Synchronize this rank's in-memory model weights into a vLLM actor.
+
+        IPC is the colocated path: every FSDP rank participates in vLLM's
+        trainer-side all-gather, while rank 0 sends the merged CUDA IPC handles
+        to the rollout actor. NCCL is the separated-GPU path: rank 0 opens a
+        trainer-vLLM process group and broadcasts tensors to inference workers.
+        """
+
+        self._assert_trainer_lease(lease)
+        modules = self._require_fsdp2()
+        if not self._initialized:
+            self.initialize_rank()
+        if not self._hydrated:
+            self.hydrate(None, lease=lease)
+        model = self._require_model()
+
+        if transport == "ipc":
+            return self._sync_weights_to_vllm_ipc(
+                rollout_handle=rollout_handle,
+                meta=meta,
+                transfer_source=transfer_source,
+                is_checkpoint_format=is_checkpoint_format,
+                modules=modules,
+                model=model,
+            )
+        if transport == "nccl":
+            return self._sync_weights_to_vllm_nccl(
+                rollout_handle=rollout_handle,
+                meta=meta,
+                transfer_source=transfer_source,
+                is_checkpoint_format=is_checkpoint_format,
+                modules=modules,
+                model=model,
+            )
+        raise BackendStateError(f"unsupported native vLLM weight sync transport: {transport}")
+
+    def _sync_weights_to_vllm_ipc(
+        self,
+        *,
+        rollout_handle: Any,
+        meta: WeightMeta,
+        transfer_source: Mapping[str, Any] | None,
+        is_checkpoint_format: bool,
+        modules: dict[str, ModuleType],
+        model: Any,
+    ) -> dict[str, Any]:
+        try:
+            ray = import_module("ray")
+            ipc_module = import_module("vllm.distributed.weight_transfer.ipc_engine")
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise BackendUnavailableError(
+                "native vLLM IPC weight sync requires vLLM with distributed.weight_transfer.ipc_engine"
+            ) from exc
+
+        args_cls = getattr(ipc_module, "IPCTrainerSendWeightsArgs", None)
+        engine_cls = getattr(ipc_module, "IPCWeightTransferEngine", None)
+        if args_cls is None or engine_cls is None or not hasattr(engine_cls, "trainer_send_weights"):
+            raise BackendUnavailableError(
+                "native vLLM IPC weight sync requires IPCTrainerSendWeightsArgs and IPCWeightTransferEngine"
+            )
+
+        logger.info(
+            "FSDP2 native vLLM IPC weight sync started: rank=%s version=%s",
+            self.config.rank,
+            meta.version_id,
+        )
+        if self.config.rank == 0:
+            ray.get(
+                rollout_handle.start_weight_update.remote(
+                    meta.model_dump(mode="json"),
+                    None if transfer_source is None else dict(transfer_source),
+                    is_checkpoint_format,
+                )
+            )
+        trainer_args = _instantiate_backend_args(
+            args_cls,
+            {"send_mode": "ray", "llm_handle": rollout_handle},
+            {"mode": "ray", "llm_handle": rollout_handle},
+        )
+        engine_cls.trainer_send_weights(
+            iterator=_named_parameters_for_weight_sync(model),
+            trainer_args=trainer_args,
+        )
+        finished = None
+        if self.config.rank == 0:
+            finished = ray.get(rollout_handle.finish_weight_update.remote())
+        if hasattr(modules["torch"], "cuda") and modules["torch"].cuda.is_available():
+            modules["torch"].cuda.synchronize()
+        logger.info(
+            "FSDP2 native vLLM IPC weight sync completed: rank=%s version=%s",
+            self.config.rank,
+            meta.version_id,
+        )
+        return {
+            "backend": "vllm_native",
+            "transport": "ipc",
+            "rank": self.config.rank,
+            "version_id": meta.version_id,
+            "rollout_finish": finished,
+        }
+
+    def _sync_weights_to_vllm_nccl(
+        self,
+        *,
+        rollout_handle: Any,
+        meta: WeightMeta,
+        transfer_source: Mapping[str, Any] | None,
+        is_checkpoint_format: bool,
+        modules: dict[str, ModuleType],
+        model: Any,
+    ) -> dict[str, Any]:
+        if self.config.rank != 0:
+            raise BackendStateError("native vLLM NCCL weight sync is owned by trainer rank 0")
+
+        try:
+            ray = import_module("ray")
+            nccl_module = import_module("vllm.distributed.weight_transfer.nccl_engine")
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise BackendUnavailableError(
+                "native vLLM NCCL weight sync requires vLLM with distributed.weight_transfer.nccl_engine"
+            ) from exc
+
+        args_cls = getattr(nccl_module, "NCCLTrainerSendWeightsArgs", None)
+        engine_cls = getattr(nccl_module, "NCCLWeightTransferEngine", None)
+        if (
+            args_cls is None
+            or engine_cls is None
+            or not hasattr(engine_cls, "trainer_init")
+            or not hasattr(engine_cls, "trainer_send_weights")
+        ):
+            raise BackendUnavailableError(
+                "native vLLM NCCL weight sync requires NCCLTrainerSendWeightsArgs and NCCLWeightTransferEngine"
+            )
+
+        parameters = list(_named_parameters_for_weight_sync(model))
+        update_info = {
+            "names": [name for name, _parameter in parameters],
+            "dtype_names": [_tensor_dtype_name(parameter) for _name, parameter in parameters],
+            "shapes": [_tensor_shape(parameter) for _name, parameter in parameters],
+            "packed": bool(self.config.extra.get("vllm_weight_sync_packed", False)),
+        }
+        init_info = {
+            "master_address": _local_ip_address(),
+            "master_port": _free_tcp_port(),
+            "rank_offset": 1,
+            "world_size": _nccl_weight_transfer_world_size(transfer_source),
+        }
+
+        logger.info(
+            "FSDP2 native vLLM NCCL weight sync started: rank=%s version=%s world_size=%s",
+            self.config.rank,
+            meta.version_id,
+            init_info["world_size"],
+        )
+        group = engine_cls.trainer_init(init_info)
+        ray.get(rollout_handle.init_weight_transfer_engine.remote(init_info))
+        ray.get(
+            rollout_handle.start_weight_update.remote(
+                meta.model_dump(mode="json"),
+                None if transfer_source is None else dict(transfer_source),
+                is_checkpoint_format,
+            )
+        )
+        update_ref = rollout_handle.update_weights.remote(update_info)
+        trainer_args = _instantiate_backend_args(
+            args_cls,
+            {"group": group, "packed": update_info["packed"]},
+            {"group": group},
+        )
+        engine_cls.trainer_send_weights(
+            iterator=iter(parameters),
+            trainer_args=trainer_args,
+        )
+        ray.get(update_ref)
+        finished = ray.get(rollout_handle.finish_weight_update.remote())
+        if hasattr(modules["torch"], "cuda") and modules["torch"].cuda.is_available():
+            modules["torch"].cuda.synchronize()
+        logger.info(
+            "FSDP2 native vLLM NCCL weight sync completed: rank=%s version=%s",
+            self.config.rank,
+            meta.version_id,
+        )
+        return {
+            "backend": "vllm_native",
+            "transport": "nccl",
+            "rank": self.config.rank,
+            "version_id": meta.version_id,
+            "rollout_finish": finished,
+            "world_size": init_info["world_size"],
+        }
 
     def _full_model_state_dict_for_export(self, model: Any) -> dict[str, Any] | None:
         if self.config.world_size <= 1:
@@ -495,6 +697,85 @@ class Fsdp2TrainerBackend(TrainerBackend):
                 raise BackendStateError(
                     f"state {field_name} {actual} does not match backend {field_name} {expected_value}"
                 )
+
+
+def _named_parameters_for_weight_sync(model: Any) -> Any:
+    for name, parameter in model.named_parameters():
+        yield name, _materialize_weight_sync_parameter(parameter)
+
+
+def _materialize_weight_sync_parameter(parameter: Any) -> Any:
+    if hasattr(parameter, "full_tensor"):
+        parameter = parameter.full_tensor()
+    if hasattr(parameter, "detach"):
+        parameter = parameter.detach()
+    if hasattr(parameter, "contiguous"):
+        parameter = parameter.contiguous()
+    return parameter
+
+
+def _instantiate_backend_args(args_cls: Any, *candidates: Mapping[str, Any]) -> Any:
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return args_cls(**dict(candidate))
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+    raise BackendUnavailableError(
+        f"could not instantiate vLLM trainer weight-transfer args {args_cls!r}"
+    ) from last_error
+
+
+def _tensor_dtype_name(tensor: Any) -> str:
+    dtype = getattr(tensor, "dtype", None)
+    if dtype is None:
+        raise BackendStateError("native vLLM NCCL weight sync received a parameter without dtype")
+    return str(dtype).removeprefix("torch.")
+
+
+def _tensor_shape(tensor: Any) -> list[int]:
+    shape = getattr(tensor, "shape", None)
+    if shape is None:
+        raise BackendStateError("native vLLM NCCL weight sync received a parameter without shape")
+    return [int(dim) for dim in shape]
+
+
+def _nccl_weight_transfer_world_size(transfer_source: Mapping[str, Any] | None) -> int:
+    if transfer_source is None:
+        return 2
+    target_worker_ids = tuple(transfer_source.get("target_worker_ids") or ())
+    target_gpu_ids = tuple(transfer_source.get("target_gpu_ids") or ())
+    inference_workers = len(target_worker_ids) or len(target_gpu_ids) or 1
+    return inference_workers + 1
+
+
+def _local_ip_address() -> str:
+    try:
+        vllm_utils = import_module("vllm.utils")
+        get_ip = getattr(vllm_utils, "get_ip", None)
+        if get_ip is not None:
+            return str(get_ip())
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
+
+
+def _free_tcp_port() -> int:
+    try:
+        vllm_utils = import_module("vllm.utils")
+        get_open_port = getattr(vllm_utils, "get_open_port", None)
+        if get_open_port is not None:
+            return int(get_open_port())
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return int(sock.getsockname()[1])
 
 
 def _sample_record_from_ref(value: Any) -> SampleRecord | None:

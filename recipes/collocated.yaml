@@ -102,6 +102,8 @@ rollout:
     dtype: bfloat16
     trust_remote_code: true
     max_model_len: 2048
+    weight_sync_backend: ipc
+    require_weight_sync: true
     engine_kwargs:
       enable_sleep_mode: true
     sampling_params:

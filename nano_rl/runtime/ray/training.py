@@ -258,6 +258,7 @@ class RayTrainingLoop:
                 train_stats = self._optimize_trainers(batch, trainer_leases)
                 exported = self._export_weight_from_trainers(current_weight)
                 registered = self._call("weight-registry", "register", exported)
+                self._sync_native_vllm_weights(registered, trainer_leases)
             except Exception:
                 self._offload_trainers_best_effort(trainer_leases)
                 trainers_offloaded = True
@@ -320,6 +321,65 @@ class RayTrainingLoop:
             if rank == 0:
                 return exported
         raise RuntimeError("trainer rank 0 is required to publish exported weights")
+
+    def _sync_native_vllm_weights(
+        self,
+        meta: dict[str, object],
+        trainer_leases: dict[int, dict[str, object]],
+    ) -> None:
+        rollout_config = self.launch_config.rollout
+        if str(rollout_config.backend) != "vllm":
+            return
+        if rollout_config.vllm.weight_sync_backend == "none":
+            return
+
+        weight = WeightMeta.model_validate(meta)
+        planner = WeightTransferPlanner(
+            method=self.launch_config.weight_transfer.method,
+            allow_rollout_only_artifact_pull=self.launch_config.weight_transfer.allow_rollout_only_artifact_pull,
+        )
+        transfer_plan = planner.build_plan(
+            weight,
+            rollout_replicas=self.launch_config.gpu_plan.rollout_replicas,
+            trainer_ranks=self.launch_config.gpu_plan.trainer_ranks,
+        )
+        self._last_weight_transfer_plan = transfer_plan.model_dump(mode="json")
+
+        refs = []
+        for replica in self.launch_config.gpu_plan.rollout_replicas:
+            source = transfer_plan.source_for_replica(replica.replica_id).model_dump(mode="json")
+            transport = self._native_vllm_transport(source)
+            participant_ranks = self._native_vllm_participant_ranks(transport)
+            for rank in participant_ranks:
+                trainer_handle = self.handles[f"trainer-rank-{rank.rank}"]
+                refs.append(
+                    trainer_handle.sync_weights_to_vllm.remote(
+                        self.handles[replica.replica_id],
+                        meta,
+                        source,
+                        trainer_leases[rank.rank],
+                        transport,
+                        True,
+                    )
+                )
+        if refs:
+            self._get(refs)
+
+    def _native_vllm_transport(self, source: dict[str, object]) -> str:
+        configured = self.launch_config.rollout.vllm.weight_sync_backend
+        if configured in {"ipc", "nccl"}:
+            return configured
+        kind = str(source.get("kind"))
+        if kind == "shared_gpu_reshard":
+            return "ipc"
+        return "nccl"
+
+    def _native_vllm_participant_ranks(self, transport: str) -> list[TrainerRankSpec]:
+        if transport == "ipc":
+            return list(self.launch_config.gpu_plan.trainer_ranks)
+        if transport == "nccl":
+            return [rank for rank in self.launch_config.gpu_plan.trainer_ranks if rank.rank == 0]
+        raise RuntimeError(f"unsupported native vLLM weight sync transport: {transport}")
 
     def _offload_trainers(self, leases: dict[int, dict[str, object]]) -> None:
         refs = [

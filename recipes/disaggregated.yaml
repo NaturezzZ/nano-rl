@@ -100,6 +100,8 @@ trainer:
 rollout:
   backend: vllm
   vllm:
+    weight_sync_backend: auto
+    require_weight_sync: true
     engine_kwargs:
       enable_sleep_mode: true
   partial_rollout:

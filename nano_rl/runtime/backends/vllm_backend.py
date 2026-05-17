@@ -8,6 +8,7 @@ actors to call later while remaining importable on machines without vLLM.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, is_dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 import importlib
 import logging
@@ -76,6 +77,8 @@ class VllmBackendConfig(BaseModel):
     offload_strategy: Literal["vllm_sleep", "teardown_and_reload"] = "vllm_sleep"
     vllm_sleep_level: Literal[1, 2] = 2
     residual_gpu_memory_budget_mb: int | None = Field(default=None, ge=0)
+    weight_sync_backend: Literal["auto", "ipc", "nccl", "none"] = "auto"
+    require_weight_sync: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -165,6 +168,8 @@ class VllmRolloutBackend:
         self._engine: Any | None = None
         self._active_weight: WeightMeta | None = None
         self._active_weight_source: WeightShardSource | None = None
+        self._pending_weight_update: tuple[WeightMeta, WeightShardSource | None] | None = None
+        self._synced_weight_versions: set[int] = set()
         self._offloaded = False
 
     @property
@@ -208,7 +213,8 @@ class VllmRolloutBackend:
             self._offloaded = False
         if self._offloaded:
             self.wake(lease=lease)
-        _notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
+        if meta.version_id not in self._synced_weight_versions:
+            _notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
         self._active_weight = meta
         self._active_weight_source = transfer_source
         logger.info(
@@ -216,6 +222,80 @@ class VllmRolloutBackend:
             meta.version_id,
             meta.checksum,
             None if transfer_source is None else transfer_source.kind.value,
+        )
+
+    def init_weight_transfer_engine(self, init_info: Mapping[str, Any]) -> dict[str, Any]:
+        """Initialize vLLM's native weight-transfer channel for this engine."""
+
+        engine = self._require_engine()
+        method = _required_method(engine, "init_weight_transfer_engine")
+        request = _build_vllm_request(
+            "vllm.distributed.weight_transfer.base",
+            "WeightTransferInitRequest",
+            {"init_info": dict(init_info)},
+        )
+        method(request)
+        return {"backend": "vllm", "action": "init_weight_transfer_engine", "init_info": dict(init_info)}
+
+    def start_weight_update(
+        self,
+        meta: WeightMeta,
+        *,
+        transfer_source: WeightShardSource | None = None,
+        is_checkpoint_format: bool = False,
+    ) -> dict[str, Any]:
+        """Start a native vLLM weight update for an already-constructed engine."""
+
+        engine = self._require_engine()
+        method = _required_method(engine, "start_weight_update")
+        _call_start_weight_update(method, is_checkpoint_format=is_checkpoint_format)
+        self._pending_weight_update = (meta, transfer_source)
+        return {
+            "backend": "vllm",
+            "action": "start_weight_update",
+            "version_id": meta.version_id,
+            "source_kind": None if transfer_source is None else transfer_source.kind.value,
+            "is_checkpoint_format": is_checkpoint_format,
+        }
+
+    def update_weights(self, update_info: Mapping[str, Any]) -> dict[str, Any]:
+        """Forward a native vLLM weight update payload to the engine."""
+
+        engine = self._require_engine()
+        method = _required_method(engine, "update_weights")
+        update_payload = _coerce_weight_update_info(update_info)
+        request = _build_vllm_request(
+            "vllm.distributed.weight_transfer.base",
+            "WeightTransferUpdateRequest",
+            {"update_info": update_payload},
+        )
+        method(request)
+        return {"backend": "vllm", "action": "update_weights"}
+
+    def finish_weight_update(self) -> dict[str, Any]:
+        """Finish a native vLLM weight update and record that the version is synced."""
+
+        engine = self._require_engine()
+        method = _required_method(engine, "finish_weight_update")
+        method()
+        if self._pending_weight_update is None:
+            raise VllmBackendError("finish_weight_update called without start_weight_update")
+        meta, transfer_source = self._pending_weight_update
+        self._synced_weight_versions.add(meta.version_id)
+        self._pending_weight_update = None
+        return {
+            "backend": "vllm",
+            "action": "finish_weight_update",
+            "version_id": meta.version_id,
+            "source_kind": None if transfer_source is None else transfer_source.kind.value,
+        }
+
+    def native_weight_sync_supported(self) -> bool:
+        if self._engine is None:
+            return False
+        return all(
+            getattr(self._engine, method_name, None) is not None
+            for method_name in ("start_weight_update", "update_weights", "finish_weight_update")
         )
 
     def generate(
@@ -479,6 +559,9 @@ def _default_engine_factory(config: VllmBackendConfig, _meta: WeightMeta) -> Any
         kwargs["dtype"] = config.dtype
     if config.max_model_len is not None:
         kwargs["max_model_len"] = config.max_model_len
+    weight_transfer_config = _weight_transfer_config_for_backend(config)
+    if weight_transfer_config is not None:
+        kwargs["weight_transfer_config"] = weight_transfer_config
     return vllm.LLM(**kwargs)
 
 
@@ -487,6 +570,33 @@ def _engine_kwargs_for_config(config: VllmBackendConfig) -> dict[str, Any]:
     if config.offload_strategy == "vllm_sleep":
         engine_kwargs["enable_sleep_mode"] = True
     return engine_kwargs
+
+
+def _weight_transfer_config_for_backend(config: VllmBackendConfig) -> Any | None:
+    backend = _native_weight_sync_backend(config)
+    if backend is None:
+        return None
+    try:
+        weight_transfer_config_cls = getattr(importlib.import_module("vllm.config"), "WeightTransferConfig")
+    except (ImportError, AttributeError) as exc:
+        if config.require_weight_sync:
+            raise VllmBackendUnavailable(
+                package_name="vllm",
+                action="construct rollout backend with native weight transfer",
+                original_error=exc,
+            ) from exc
+        return None
+    return weight_transfer_config_cls(backend=backend)
+
+
+def _native_weight_sync_backend(config: VllmBackendConfig) -> str | None:
+    if config.weight_sync_backend == "none":
+        return None
+    if config.weight_sync_backend == "auto":
+        if config.gpu_ids:
+            return "ipc"
+        return "nccl"
+    return config.weight_sync_backend
 
 
 def _call_engine_sleep(engine: Any, *, level: int) -> bool:
@@ -600,6 +710,56 @@ def _notify_engine_weight(engine: Any, meta: WeightMeta, *, transfer_source: Wei
                 except TypeError:
                     raise exc
             return
+
+
+def _required_method(engine: Any, method_name: str) -> Any:
+    method = getattr(engine, method_name, None)
+    if method is None:
+        raise VllmBackendError(
+            f"vLLM engine does not expose {method_name}; install a vLLM version with native "
+            "Weight Transfer support or set rollout.vllm.weight_sync_backend=none for checkpoint-only reloads"
+        )
+    return method
+
+
+def _build_vllm_request(module_name: str, class_name: str, payload: Mapping[str, Any]) -> Any:
+    try:
+        request_cls = getattr(importlib.import_module(module_name), class_name)
+    except (ImportError, AttributeError):
+        return dict(payload)
+    return request_cls(**dict(payload))
+
+
+def _coerce_weight_update_info(update_info: Any) -> dict[str, Any]:
+    if is_dataclass(update_info):
+        payload = asdict(update_info)
+    elif isinstance(update_info, Mapping):
+        payload = dict(update_info)
+    elif hasattr(update_info, "__dict__"):
+        payload = dict(vars(update_info))
+    else:
+        raise VllmBackendError("native vLLM update_weights payload must be a mapping or dataclass")
+
+    nested = payload.get("update_info")
+    if len(payload) == 1 and isinstance(nested, Mapping):
+        return dict(nested)
+    if len(payload) == 1 and is_dataclass(nested):
+        return asdict(nested)
+    return payload
+
+
+def _call_start_weight_update(method: Any, *, is_checkpoint_format: bool) -> None:
+    for args, kwargs in (
+        ((), {"is_checkpoint_format": is_checkpoint_format}),
+        ((is_checkpoint_format,), {}),
+        ((), {}),
+    ):
+        try:
+            method(*args, **kwargs)
+            return
+        except TypeError:
+            continue
+    method(is_checkpoint_format=is_checkpoint_format)
 
 
 def _call_generate(

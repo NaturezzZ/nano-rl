@@ -358,6 +358,15 @@ properties:
           trust_remote_code: { type: boolean, default: false }
           engine_kwargs: { type: object }
           sampling_params: { type: object }
+          weight_sync_backend:
+            type: string
+            enum: [auto, ipc, nccl, none]
+            default: auto
+            description: Native vLLM Weight Transfer backend. auto maps shared-GPU rollout replicas to ipc and rollout-only/separate-GPU replicas to nccl.
+          require_weight_sync:
+            type: boolean
+            default: true
+            description: Fail fast if the selected vLLM Weight Transfer backend is unavailable.
       huggingface:
         type: object
         properties:

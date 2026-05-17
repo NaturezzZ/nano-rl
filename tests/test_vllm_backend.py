@@ -86,6 +86,23 @@ class FakeVllmEngineWithoutSleep(FakeVllmEngine):
     offload = None
 
 
+class FakeNativeWeightTransferEngine(FakeVllmEngine):
+    def __init__(self, config: VllmBackendConfig, meta: WeightMeta) -> None:
+        super().__init__(config, meta)
+        self.start_calls: list[object] = []
+        self.update_calls: list[object] = []
+        self.finish_calls = 0
+
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        self.start_calls.append(is_checkpoint_format)
+
+    def update_weights(self, request) -> None:
+        self.update_calls.append(request)
+
+    def finish_weight_update(self) -> None:
+        self.finish_calls += 1
+
+
 def test_importing_backend_does_not_import_vllm() -> None:
     module = importlib.import_module("nano_rl.runtime.backends.vllm_backend")
 
@@ -162,6 +179,46 @@ def test_backend_forwards_weight_transfer_source_to_engine() -> None:
 
     assert backend.active_weight_source == source
     assert engines[0].activated == [(6, "checksum", "shared_gpu_reshard")]
+
+
+def test_backend_exposes_native_vllm_weight_update_lifecycle() -> None:
+    engines: list[FakeNativeWeightTransferEngine] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeNativeWeightTransferEngine:
+        engine = FakeNativeWeightTransferEngine(config, meta)
+        engines.append(engine)
+        return engine
+
+    backend = build_rollout_backend(
+        {"gpu_ids": (0,), "holder_id": "worker-0"},
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+    weight = _weight(version_id=12)
+    source = WeightShardSource(
+        replica_id="rollout-dp-0",
+        kind=WeightShardSourceKind.SHARED_GPU_RESHARD,
+        target_gpu_ids=(0,),
+        reason="unit test",
+    )
+
+    backend.activate_weight(_weight(version_id=0), lease=lease)
+    start = backend.start_weight_update(weight, transfer_source=source, is_checkpoint_format=True)
+    updated = backend.update_weights(
+        {"update_info": {"names": ["model.weight"], "dtype_names": ["bfloat16"], "shapes": [(2, 2)]}}
+    )
+    finished = backend.finish_weight_update()
+    backend.activate_weight(weight, lease=lease, transfer_source=source)
+
+    assert start["version_id"] == 12
+    assert updated["action"] == "update_weights"
+    assert finished["version_id"] == 12
+    assert engines[0].start_calls == [True]
+    assert engines[0].update_calls == [
+        {"update_info": {"names": ["model.weight"], "dtype_names": ["bfloat16"], "shapes": [(2, 2)]}}
+    ]
+    assert engines[0].finish_calls == 1
+    assert backend.active_weight == weight
 
 
 def test_backend_offloads_and_wakes_vllm_engine_before_generate() -> None:

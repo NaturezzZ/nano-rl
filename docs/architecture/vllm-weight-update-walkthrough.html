@@ -3,26 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>nano-rl vLLM Serving Engine 权重更新代码走读</title>
+  <title>nano-rl vLLM 权重热同步代码走读</title>
   <style>
     :root {
-      --bg: #f6f7f9;
+      --bg: #f5f7fb;
+      --ink: #172033;
+      --muted: #5f6f86;
       --panel: #ffffff;
-      --ink: #18212f;
-      --muted: #637083;
-      --line: #d9e0ea;
-      --teal: #0f766e;
+      --line: #d8e0eb;
       --blue: #2563eb;
-      --green: #157347;
-      --amber: #b45309;
+      --teal: #0f766e;
+      --green: #167047;
+      --amber: #a35b06;
       --red: #b42318;
+      --soft-blue: #eef5ff;
+      --soft-teal: #e9f7f5;
+      --soft-green: #edf8f1;
+      --soft-amber: #fff7ed;
+      --soft-red: #fff1f0;
       --code-bg: #111827;
       --code-fg: #f9fafb;
-      --soft-blue: #eef5ff;
-      --soft-teal: #ebf7f5;
-      --soft-amber: #fff7ed;
-      --soft-green: #edf8f1;
-      --soft-red: #fff1f0;
     }
 
     * {
@@ -37,7 +37,7 @@
       margin: 0;
       color: var(--ink);
       background:
-        linear-gradient(180deg, #eef4ff 0, rgba(238, 244, 255, 0) 320px),
+        linear-gradient(180deg, #eef5ff 0, rgba(238, 245, 255, 0) 340px),
         var(--bg);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.68;
@@ -97,7 +97,7 @@
     }
 
     th {
-      color: #344054;
+      color: #334155;
       background: #f8fafc;
       font-size: 12px;
       letter-spacing: 0.04em;
@@ -110,11 +110,21 @@
       padding: 30px 0 58px;
     }
 
-    .hero {
-      padding: 32px 34px;
+    .hero,
+    .toc,
+    section.panel,
+    .note,
+    .lane,
+    .step,
+    .fact {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.94);
+      background: var(--panel);
+    }
+
+    .hero {
+      padding: 32px 34px;
+      background: rgba(255, 255, 255, 0.95);
     }
 
     .eyebrow {
@@ -141,7 +151,7 @@
     }
 
     h3 {
-      margin: 22px 0 8px;
+      margin: 20px 0 8px;
       font-size: 17px;
       line-height: 1.35;
       letter-spacing: 0;
@@ -174,9 +184,6 @@
       top: 16px;
       align-self: start;
       padding: 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
     }
 
     .toc h2 {
@@ -205,74 +212,62 @@
 
     section.panel {
       padding: 24px 26px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
     }
 
-    .callout-grid,
-    .lane-grid,
-    .evidence-grid,
-    .check-grid {
+    .facts,
+    .lanes,
+    .steps {
       display: grid;
       gap: 12px;
+      margin-top: 14px;
     }
 
-    .callout-grid {
+    .facts {
       grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
       margin-top: 20px;
     }
 
-    .lane-grid {
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      margin-top: 14px;
-    }
-
-    .evidence-grid {
+    .lanes {
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      margin-top: 12px;
     }
 
-    .check-grid {
-      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-      margin-top: 12px;
+    .steps {
+      grid-template-columns: 1fr;
     }
 
-    .callout,
+    .fact,
     .lane,
-    .evidence,
-    .check {
+    .step,
+    .note {
       padding: 14px 16px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
       background: #fbfcfe;
     }
 
-    .callout.teal,
+    .fact.teal,
     .lane.teal {
       border-color: rgba(15, 118, 110, 0.28);
       background: var(--soft-teal);
     }
 
-    .callout.blue,
+    .fact.blue,
     .lane.blue {
       border-color: rgba(37, 99, 235, 0.24);
       background: var(--soft-blue);
     }
 
-    .callout.green,
+    .fact.green,
     .lane.green {
-      border-color: rgba(21, 115, 71, 0.25);
+      border-color: rgba(22, 112, 71, 0.25);
       background: var(--soft-green);
     }
 
-    .callout.amber,
+    .fact.amber,
     .lane.amber {
-      border-color: rgba(180, 83, 9, 0.28);
+      border-color: rgba(163, 91, 6, 0.28);
       background: var(--soft-amber);
     }
 
-    .callout.red {
+    .note.red {
       border-color: rgba(180, 35, 24, 0.26);
       background: var(--soft-red);
     }
@@ -286,10 +281,8 @@
       text-transform: uppercase;
     }
 
-    .value {
-      margin: 0;
-      font-size: 14px;
-      line-height: 1.55;
+    .muted {
+      color: var(--muted);
     }
 
     .diagram {
@@ -303,44 +296,9 @@
 
     .diagram svg {
       display: block;
-      min-width: 780px;
+      min-width: 900px;
       width: 100%;
       height: auto;
-    }
-
-    .step-list {
-      display: grid;
-      gap: 10px;
-      margin-top: 14px;
-      padding: 0;
-      list-style: none;
-    }
-
-    .step-list li {
-      display: grid;
-      grid-template-columns: 34px minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-      padding: 12px 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfe;
-    }
-
-    .num {
-      display: inline-grid;
-      width: 28px;
-      height: 28px;
-      place-items: center;
-      border-radius: 999px;
-      color: white;
-      background: var(--teal);
-      font-size: 13px;
-      font-weight: 750;
-    }
-
-    .muted {
-      color: var(--muted);
     }
 
     .status {
@@ -351,35 +309,6 @@
       background: #dff7ec;
       font-size: 12px;
       font-weight: 700;
-    }
-
-    .status.warn {
-      color: #7c2d12;
-      background: #ffedd5;
-    }
-
-    .status.risk {
-      color: #7f1d1d;
-      background: #fee2e2;
-    }
-
-    details {
-      margin-top: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfcfe;
-    }
-
-    summary {
-      cursor: pointer;
-      padding: 11px 14px;
-      color: #344054;
-      font-weight: 700;
-    }
-
-    details pre {
-      margin: 0;
-      border-radius: 0 0 8px 8px;
     }
 
     .footer {
@@ -417,29 +346,28 @@
   <main class="shell">
     <header class="hero">
       <p class="eyebrow">Code Walkthrough</p>
-      <h1>训练后如何把新参数更新到 vLLM serving engine</h1>
+      <h1>训练 step 后把新参数同步进 vLLM serving engine</h1>
       <p class="subtitle">
-        这份走读按当前仓库代码解释一次 train step 结束后的权重发布、传输规划、rollout 暂停、vLLM backend 激活和全局 ack。重点结论是：
-        nano-rl 已经把控制面和 hook 铺好，但 stock vLLM 的真实 in-place 权重热更新还需要一个实现了
-        <code>activate_weight</code>、<code>load_weight</code> 或 <code>load_weights</code> 的 engine/adapter。
+        结论先放前面：现在设计和代码都按“同一个模型、每个 optimizer step 后热同步权重、下一轮 rollout 使用新参数”走。
+        主路径不是写 checkpoint 再让 vLLM load，而是 vLLM 原生 Weight Transfer。checkpoint artifact 只保留为恢复、审计和 fallback。
       </p>
 
-      <div class="callout-grid">
-        <div class="callout teal">
-          <p class="label">入口</p>
-          <p class="value"><code>RayTrainingLoop._run_train_step()</code> 训练、导出、注册，再调用 <code>_activate_weight_for_rollout()</code>。</p>
+      <div class="facts">
+        <div class="fact teal">
+          <p class="label">是否能切版本</p>
+          <p>能。nano-rl 用 <code>WeightMeta.version_id</code> 做控制面版本，vLLM engine 用 native weight update 接收同一个模型的新 tensor。</p>
         </div>
-        <div class="callout blue">
-          <p class="label">控制面</p>
-          <p class="value"><code>WeightTransferPlanner</code> 决定每个 rollout replica 从 artifact、shared GPU reshard 或 Ray object ref 取权重。</p>
+        <div class="fact blue">
+          <p class="label">同卡/同机</p>
+          <p>shared-GPU replica 走 <code>ipc</code>，数据面是 CUDA IPC handle，跨 Ray actor 进程传递，不走 ckpt reload。</p>
         </div>
-        <div class="callout green">
-          <p class="label">执行面</p>
-          <p class="value"><code>RolloutReplicaControllerActor.activate_weight()</code> 把 <code>WeightMeta</code> 和 transfer source 交给 <code>VllmRolloutBackend</code>。</p>
+        <div class="fact green">
+          <p class="label">分卡</p>
+          <p>rollout-only 或 trainer/rollout 分卡 replica 走 <code>nccl</code>，rank0 和 vLLM workers 建 NCCL 通信组后广播权重。</p>
         </div>
-        <div class="callout amber">
-          <p class="label">当前边界</p>
-          <p class="value"><code>_notify_engine_weight()</code> 是热更 hook。默认 <code>vllm.LLM</code> 若没有这些方法，当前函数会跳过真实加载。</p>
+        <div class="fact amber">
+          <p class="label">防 stale</p>
+          <p><code>require_weight_sync=true</code> 时缺少 vLLM Weight Transfer 能力会 fail fast，不会悄悄用旧权重继续 serving。</p>
         </div>
       </div>
     </header>
@@ -449,14 +377,14 @@
         <h2>目录</h2>
         <ol>
           <li><a href="#answer">一句话答案</a></li>
-          <li><a href="#flow">端到端流程</a></li>
-          <li><a href="#train-window">训练窗口</a></li>
-          <li><a href="#transfer-plan">权重传输计划</a></li>
-          <li><a href="#activation">rollout 激活</a></li>
-          <li><a href="#vllm">vLLM backend 做了什么</a></li>
-          <li><a href="#serving">serving 时如何保证版本</a></li>
-          <li><a href="#limits">实现边界和风险</a></li>
-          <li><a href="#tests">测试证据</a></li>
+          <li><a href="#loop">step 级链路</a></li>
+          <li><a href="#control-plane">控制面</a></li>
+          <li><a href="#data-plane">数据面</a></li>
+          <li><a href="#vllm">vLLM backend</a></li>
+          <li><a href="#config">配置入口</a></li>
+          <li><a href="#version">版本一致性</a></li>
+          <li><a href="#limits">边界</a></li>
+          <li><a href="#tests">验证</a></li>
         </ol>
       </nav>
 
@@ -464,404 +392,256 @@
         <section id="answer" class="panel">
           <h2>一句话答案</h2>
           <p>
-            每次训练完以后，trainer rank 0 产出一个新的 <code>WeightMeta(version_id=N)</code>，
-            driver 把它注册到 <code>WeightRegistry</code>，暂停 rollout 派发，为每个 rollout replica 计算
-            <code>WeightShardSource</code>，然后逐个调用 rollout actor 的 <code>activate_weight(meta, leases, source)</code>。
-            rollout actor 再调用 <code>VllmRolloutBackend.activate_weight()</code>，后者在合法 rollout lease 下构建或唤醒 vLLM engine，
-            并尝试调用 engine 的权重加载 hook。所有 replica ack 后，这个版本才变成 <code>active_global</code>。
+            每次 train step 结束后，driver 先拿到新的 <code>WeightMeta(version_id=N)</code> 并注册；
+            随后调用 <code>_sync_native_vllm_weights()</code>，按 replica 的 <code>WeightShardSource</code> 选择 IPC 或 NCCL，
+            让 trainer 进程把当前 <code>model.named_parameters()</code> 直接同步进 vLLM rollout actor。
+            只有同步完成后，后续 <code>activate_weight()</code> 和 registry ack 才会把 version N 标成 rollout active。
           </p>
           <p class="muted">
             代码锚点：
-            <a href="../../nano_rl/runtime/ray/training.py">nano_rl/runtime/ray/training.py</a> lines 239-279, 339-371；
-            <a href="../../nano_rl/runtime/ray/actors.py">nano_rl/runtime/ray/actors.py</a> lines 203-220；
-            <a href="../../nano_rl/runtime/backends/vllm_backend.py">nano_rl/runtime/backends/vllm_backend.py</a> lines 182-219, 591-603。
+            <a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a>，
+            <a href="../../nano_rl/runtime/backends/fsdp2_backend.py">fsdp2_backend.py</a>，
+            <a href="../../nano_rl/runtime/backends/vllm_backend.py">vllm_backend.py</a>，
+            <a href="../../nano_rl/runtime/ray/actors.py">actors.py</a>。
           </p>
         </section>
 
-        <section id="flow" class="panel">
-          <h2>端到端流程</h2>
-          <p>
-            下面这个图是当前 Ray 路径的一次 train step。注意两个分界：先让 shared rollout engine sleep/offload，再给 trainer
-            拿 lease 训练；训练结束后 trainer offload，shared GPU lease 切回 rollout，再 wake 和 activate 新权重。
-          </p>
-
-          <div class="diagram" aria-label="训练后权重更新流程图">
-            <svg viewBox="0 0 1100 370" role="img">
+        <section id="loop" class="panel">
+          <h2>step 级链路</h2>
+          <div class="diagram" aria-label="训练 step 后 vLLM 权重同步流程">
+            <svg viewBox="0 0 1160 420" role="img">
               <defs>
                 <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                   <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"></path>
                 </marker>
                 <style>
-                  .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 8; }
-                  .box-teal { fill: #ebf7f5; stroke: #0f766e; }
-                  .box-blue { fill: #eef5ff; stroke: #2563eb; }
-                  .box-amber { fill: #fff7ed; stroke: #b45309; }
-                  .box-green { fill: #edf8f1; stroke: #157347; }
-                  .box-red { fill: #fff1f0; stroke: #b42318; }
-                  .text { fill: #18212f; font: 14px Inter, system-ui, sans-serif; }
-                  .small { fill: #637083; font: 12px Inter, system-ui, sans-serif; }
-                  .arrow { stroke: #334155; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
                   .lane { fill: #f8fafc; stroke: #e2e8f0; }
+                  .box { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 8; }
+                  .teal { fill: #e9f7f5; stroke: #0f766e; }
+                  .blue { fill: #eef5ff; stroke: #2563eb; }
+                  .green { fill: #edf8f1; stroke: #167047; }
+                  .amber { fill: #fff7ed; stroke: #a35b06; }
+                  .red { fill: #fff1f0; stroke: #b42318; }
+                  .text { fill: #172033; font: 14px Inter, system-ui, sans-serif; }
+                  .small { fill: #5f6f86; font: 12px Inter, system-ui, sans-serif; }
+                  .arrow { stroke: #334155; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
                 </style>
               </defs>
 
-              <rect class="lane" x="18" y="18" width="1064" height="82" rx="8"></rect>
-              <rect class="lane" x="18" y="144" width="1064" height="82" rx="8"></rect>
-              <rect class="lane" x="18" y="270" width="1064" height="82" rx="8"></rect>
-              <text class="small" x="34" y="44">Driver / Controller</text>
-              <text class="small" x="34" y="170">Trainer ranks</text>
-              <text class="small" x="34" y="296">Rollout / vLLM replicas</text>
+              <rect class="lane" x="20" y="24" width="1120" height="82" rx="8"></rect>
+              <rect class="lane" x="20" y="168" width="1120" height="82" rx="8"></rect>
+              <rect class="lane" x="20" y="312" width="1120" height="82" rx="8"></rect>
+              <text class="small" x="38" y="50">Driver / Registry</text>
+              <text class="small" x="38" y="194">Trainer ranks</text>
+              <text class="small" x="38" y="338">Rollout / vLLM actors</text>
 
-              <rect class="box box-teal" x="150" y="35" width="132" height="48"></rect>
-              <text class="text" x="166" y="56">offload rollout</text>
-              <text class="small" x="166" y="73">shared replicas</text>
+              <rect class="box blue" x="160" y="42" width="128" height="48"></rect>
+              <text class="text" x="180" y="63">optimize</text>
+              <text class="small" x="180" y="80">FSDP2 step</text>
 
-              <rect class="box box-blue" x="325" y="35" width="126" height="48"></rect>
-              <text class="text" x="344" y="56">grant train</text>
-              <text class="small" x="344" y="73">trainer lease</text>
+              <rect class="box green" x="335" y="42" width="132" height="48"></rect>
+              <text class="text" x="354" y="63">register</text>
+              <text class="small" x="354" y="80">WeightMeta N</text>
 
-              <rect class="box box-blue" x="496" y="161" width="128" height="48"></rect>
-              <text class="text" x="514" y="182">optimize</text>
-              <text class="small" x="514" y="199">FSDP2 step</text>
+              <rect class="box amber" x="515" y="42" width="152" height="48"></rect>
+              <text class="text" x="535" y="63">build plan</text>
+              <text class="small" x="535" y="80">source/replica</text>
 
-              <rect class="box box-green" x="660" y="161" width="132" height="48"></rect>
-              <text class="text" x="678" y="182">export weight</text>
-              <text class="small" x="678" y="199">rank 0 publishes</text>
+              <rect class="box teal" x="160" y="186" width="160" height="48"></rect>
+              <text class="text" x="181" y="207">IPC path</text>
+              <text class="small" x="181" y="224">all ranks participate</text>
 
-              <rect class="box box-green" x="830" y="35" width="128" height="48"></rect>
-              <text class="text" x="849" y="56">register</text>
-              <text class="small" x="849" y="73">WeightMeta</text>
+              <rect class="box blue" x="390" y="186" width="160" height="48"></rect>
+              <text class="text" x="414" y="207">NCCL path</text>
+              <text class="small" x="414" y="224">rank0 broadcast</text>
 
-              <rect class="box box-amber" x="150" y="287" width="132" height="48"></rect>
-              <text class="text" x="168" y="308">wake rollout</text>
-              <text class="small" x="168" y="325">sleep/reload</text>
+              <rect class="box amber" x="675" y="330" width="170" height="48"></rect>
+              <text class="text" x="696" y="351">vLLM update</text>
+              <text class="small" x="696" y="368">start/update/finish</text>
 
-              <rect class="box box-amber" x="325" y="287" width="150" height="48"></rect>
-              <text class="text" x="343" y="308">transfer plan</text>
-              <text class="small" x="343" y="325">source per replica</text>
+              <rect class="box green" x="900" y="42" width="148" height="48"></rect>
+              <text class="text" x="922" y="63">ack active</text>
+              <text class="small" x="922" y="80">next rollout uses N</text>
 
-              <rect class="box box-red" x="520" y="287" width="155" height="48"></rect>
-              <text class="text" x="539" y="308">activate vLLM</text>
-              <text class="small" x="539" y="325">engine hook</text>
-
-              <rect class="box box-green" x="730" y="287" width="145" height="48"></rect>
-              <text class="text" x="751" y="308">ack activation</text>
-              <text class="small" x="751" y="325">active_global</text>
-
-              <rect class="box box-teal" x="925" y="287" width="120" height="48"></rect>
-              <text class="text" x="950" y="308">resume</text>
-              <text class="small" x="950" y="325">new rollout</text>
-
-              <path class="arrow" d="M282 59 H325"></path>
-              <path class="arrow" d="M451 59 C480 59 480 185 496 185"></path>
-              <path class="arrow" d="M624 185 H660"></path>
-              <path class="arrow" d="M792 185 C818 185 810 59 830 59"></path>
-              <path class="arrow" d="M894 83 C894 126 216 245 216 287"></path>
-              <path class="arrow" d="M282 311 H325"></path>
-              <path class="arrow" d="M475 311 H520"></path>
-              <path class="arrow" d="M675 311 H730"></path>
-              <path class="arrow" d="M875 311 H925"></path>
+              <path class="arrow" d="M288 66 H335"></path>
+              <path class="arrow" d="M467 66 H515"></path>
+              <path class="arrow" d="M591 90 C572 135 290 145 240 186"></path>
+              <path class="arrow" d="M615 90 C630 135 510 145 470 186"></path>
+              <path class="arrow" d="M320 210 C470 260 625 292 675 340"></path>
+              <path class="arrow" d="M550 210 C650 250 710 292 740 330"></path>
+              <path class="arrow" d="M845 354 C900 310 980 150 974 90"></path>
             </svg>
+          </div>
+
+          <div class="steps">
+            <div class="step">
+              <p><strong>1. train step 完成。</strong> <code>RayTrainingLoop._run_train_step()</code> 训练、导出并调用 <code>WeightRegistryActor.register()</code>。</p>
+            </div>
+            <div class="step">
+              <p><strong>2. 同步新 tensor。</strong> <code>_sync_native_vllm_weights()</code> 在 activation ack 之前触发 trainer-to-vLLM native sync。</p>
+            </div>
+            <div class="step">
+              <p><strong>3. 再激活版本。</strong> <code>_activate_weight_for_rollout()</code> 仍负责 pause、begin_activation、replica ack 和 resume。</p>
+            </div>
           </div>
         </section>
 
-        <section id="train-window" class="panel">
-          <h2>训练窗口</h2>
+        <section id="control-plane" class="panel">
+          <h2>控制面</h2>
           <p>
-            Ray 路径的核心函数是 <code>RayTrainingLoop._run_train_step()</code>。它先处理 GPU ownership，再训练，再导出新版本。
-          </p>
-          <ol class="step-list">
-            <li>
-              <span class="num">1</span>
-              <div>
-                <p><strong>让 shared rollout 退场。</strong> <code>_offload_shared_rollouts()</code> 调 rollout replica 的 <code>offload()</code>，vLLM backend 默认使用 sleep mode。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 249, 372-386。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">2</span>
-              <div>
-                <p><strong>切到 trainer lease。</strong> <code>_grant_train_window()</code> 把 shared GPU 的 active role 切为 <code>trainer</code>。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 250-254, 396-405。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">3</span>
-              <div>
-                <p><strong>hydrate、optimize、export。</strong> trainer rank 在 lease 下 hydrate，然后 <code>optimize()</code>，最后所有 rank 参与 <code>export_weight()</code>，rank 0 返回真正发布的 <code>WeightMeta</code>。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 255-260, 281-322。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">4</span>
-              <div>
-                <p><strong>trainer 退场，rollout 回场。</strong> 成功时 trainer offload，batch ack；finally 里把 shared GPU lease 切回 <code>rollout</code> 并 wake rollout engine。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 266-278, 407-429。</p>
-              </div>
-            </li>
-          </ol>
-
-          <details>
-            <summary>关键代码片段：训练结束后导出并注册</summary>
-            <pre><code>train_stats = self._optimize_trainers(batch, trainer_leases)
-exported = self._export_weight_from_trainers(current_weight)
-registered = self._call("weight-registry", "register", exported)
-...
-self._grant_rollout_window(controller_step)
-self._wake_shared_rollouts()
-
-active = self._activate_weight_for_rollout(registered)</code></pre>
-          </details>
-        </section>
-
-        <section id="transfer-plan" class="panel">
-          <h2>权重传输计划</h2>
-          <p>
-            <code>WeightTransferPlanner</code> 不直接搬 tensor，它只产出控制面计划：每个 rollout replica 应该从哪里拿到版本 N 的 shard。
-            这让 trainer export、registry 状态机、vLLM 激活彼此解耦。
+            控制面不传大 tensor，只传版本、计划、lease 和 ack。核心对象是 <code>WeightMeta</code> 和 <code>WeightTransferPlan</code>。
+            <code>WeightTransferPlanner</code> 根据 GPU 拓扑为每个 rollout replica 生成一个 <code>WeightShardSource</code>。
           </p>
 
           <table>
             <thead>
               <tr>
                 <th>source kind</th>
-                <th>什么时候出现</th>
-                <th>语义</th>
-                <th>代码位置</th>
+                <th>native backend</th>
+                <th>含义</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td><code>shared_gpu_reshard</code></td>
-                <td>rollout TP group 的所有 GPU 同时也是 trainer rank GPU</td>
-                <td>激活时可以从本机 shared GPU 上的 trainer-resident state 重排成 vLLM TP layout。</td>
-                <td><a href="../../nano_rl/runtime/weight_transfer.py">weight_transfer.py</a> lines 106-125</td>
+                <td><code>ipc</code></td>
+                <td>rollout TP group 所在 GPU 同时也是 trainer rank GPU。数据面用 CUDA IPC handle 跨进程共享 tensor。</td>
               </tr>
               <tr>
                 <td><code>artifact_pull</code></td>
-                <td>rollout-only GPU 没有 trainer shard</td>
-                <td>从 <code>WeightMeta.artifact_uri</code> 或 manifest hydrate。默认 <code>locality_aware_checkpoint</code> 会用这个兜住 rollout-only GPU。</td>
-                <td><a href="../../nano_rl/runtime/weight_transfer.py">weight_transfer.py</a> lines 127-144</td>
+                <td><code>nccl</code></td>
+                <td>rollout-only GPU 没有 trainer-resident 权重。当前热同步路径用 NCCL 从 trainer rank0 广播到 vLLM workers。</td>
               </tr>
               <tr>
                 <td><code>ray_object_ref</code></td>
-                <td>显式配置 <code>weight_transfer.method=objectref</code></td>
-                <td>小权重或 debug 路径，source 给出 <code>object_ref_key</code>。</td>
-                <td><a href="../../nano_rl/runtime/weight_transfer.py">weight_transfer.py</a> lines 50-62, 88-96</td>
+                <td>调试路径</td>
+                <td>保留给 mock、小模型或实验；真实大模型不把 Ray object store 当主权重总线。</td>
               </tr>
             </tbody>
           </table>
 
-          <div class="lane-grid">
-            <div class="lane teal">
-              <p class="label">配置入口</p>
-              <p class="value"><code>recipes/collocated.yaml</code> 和 <code>recipes/disaggregated.yaml</code> 默认都使用 <code>locality_aware_checkpoint</code>。</p>
-            </div>
-            <div class="lane amber">
-              <p class="label">rollout-only 约束</p>
-              <p class="value">如果存在 <code>rollout_only_gpus</code>，<code>allow_rollout_only_artifact_pull</code> 必须为 true，否则没有 trainer shard 可用。</p>
-            </div>
-          </div>
+          <pre><code>registered = self._call("weight-registry", "register", exported)
+self._sync_native_vllm_weights(registered, trainer_leases)
+...
+active = self._activate_weight_for_rollout(registered)</code></pre>
         </section>
 
-        <section id="activation" class="panel">
-          <h2>rollout 激活</h2>
-          <p>
-            <code>_activate_weight_for_rollout()</code> 是新权重进入 serving 路径的主控函数。它先暂停 rollout manager，
-            避免旧派发和新激活并行，然后 registry 进入 <code>activating</code>，最后按 replica 顺序调用 actor。
-          </p>
+        <section id="data-plane" class="panel">
+          <h2>数据面</h2>
 
-          <ol class="step-list">
-            <li>
-              <span class="num">1</span>
-              <div>
-                <p><strong>跳过重复版本。</strong> 如果 <code>_rollout_active_weight_version</code> 已经是当前版本，直接返回，避免重复激活。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 339-342。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">2</span>
-              <div>
-                <p><strong>生成 transfer plan。</strong> planner 使用 <code>WeightMeta</code>、rollout replica 列表和 trainer rank 列表生成 per-replica source。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 343-352。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">3</span>
-              <div>
-                <p><strong>暂停、begin、逐个 activate。</strong> 每个 replica 拿当前 rollout lease 和自己的 source，调用 <code>activate_weight()</code>。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/ray/training.py">ray/training.py</a> lines 354-363。</p>
-              </div>
-            </li>
-            <li>
-              <span class="num">4</span>
-              <div>
-                <p><strong>ack 到全局活跃。</strong> 每个 replica 成功后调用 registry ack。所有 required replica 都 ack 后，registry 把版本状态切到 <code>active_global</code>。</p>
-                <p class="muted">代码：<a href="../../nano_rl/runtime/weight_registry.py">weight_registry.py</a> lines 42-67。</p>
-              </div>
-            </li>
-          </ol>
+          <div class="lanes">
+            <div class="lane teal">
+              <h3>IPC: 同机同 GPU / shared-GPU</h3>
+              <p>
+                driver 对一个 shared rollout replica 会调所有 trainer ranks 的
+                <code>TrainerRankActor.sync_weights_to_vllm(..., transport="ipc")</code>。
+                FSDP ranks 在各自进程里调用 <code>IPCWeightTransferEngine.trainer_send_weights()</code>；
+                vLLM 的 IPC engine 通过 CUDA IPC handle 跨进程拿 tensor，rank0 负责把合并后的 update 发给 rollout actor。
+              </p>
+              <pre><code>if transport == "ipc":
+    participants = all_trainer_ranks
+    IPCWeightTransferEngine.trainer_send_weights(
+        iterator=_named_parameters_for_weight_sync(model),
+        trainer_args=IPCTrainerSendWeightsArgs(send_mode="ray", llm_handle=rollout),
+    )</code></pre>
+            </div>
 
-          <details>
-            <summary>关键代码片段：激活每个 rollout replica</summary>
-            <pre><code>self._call("rollout-manager", "pause_for_weight", f"activate-v{weight.version_id}")
-self._call("weight-registry", "begin_activation", weight.version_id, replica_ids)
-for replica in self.launch_config.gpu_plan.rollout_replicas:
-    leases = self._rollout_leases_for_replica(replica)
-    source = transfer_plan.source_for_replica(replica.replica_id).model_dump(mode="json")
-    self._call(replica.replica_id, "activate_weight", meta, leases, source)
-    active = self._call("weight-registry", "ack_activation", weight.version_id, replica.replica_id)</code></pre>
-          </details>
+            <div class="lane blue">
+              <h3>NCCL: 分卡 / rollout-only</h3>
+              <p>
+                NCCL 路径由 trainer rank0 开一个 trainer-vLLM worker 通信组。
+                rollout actor 先进入 <code>update_weights()</code> 等待接收；trainer 侧随后调用
+                <code>NCCLWeightTransferEngine.trainer_send_weights()</code> 广播每个参数 tensor。
+              </p>
+              <pre><code>init_info = {
+    "master_address": local_ip,
+    "master_port": free_port,
+    "rank_offset": 1,
+    "world_size": 1 + inference_worker_count,
+}
+rollout.init_weight_transfer_engine(init_info)
+update_ref = rollout.update_weights(update_info)
+NCCLWeightTransferEngine.trainer_send_weights(iter(parameters), trainer_args)
+ray.get(update_ref)</code></pre>
+            </div>
+          </div>
         </section>
 
         <section id="vllm" class="panel">
-          <h2>vLLM Backend 做了什么</h2>
+          <h2>vLLM backend</h2>
           <p>
-            actor 层的 <code>activate_weight()</code> 会先更新本地角色状态，再把同一个 <code>WeightMeta</code>、rollout lease 和
-            <code>WeightShardSource</code> 传给 backend。只要 <code>rollout.backend: vllm</code>，这里就是 <code>VllmRolloutBackend</code>。
+            <code>VllmRolloutBackend</code> 现在不只会构造 <code>vllm.LLM</code>，还把 native weight update lifecycle 暴露给 Ray actor：
+            <code>init_weight_transfer_engine</code>、<code>start_weight_update</code>、<code>update_weights</code>、<code>finish_weight_update</code>。
           </p>
-
-          <div class="evidence-grid">
-            <div class="evidence">
-              <p class="label">actor 入口</p>
-              <p class="value"><a href="../../nano_rl/runtime/ray/actors.py">actors.py</a> lines 203-220：解析 <code>WeightMeta</code>、<code>GpuLease</code>、<code>WeightShardSource</code> 后调用 <code>self._backend.activate_weight(...)</code>。</p>
-            </div>
-            <div class="evidence">
-              <p class="label">lease 校验</p>
-              <p class="value"><a href="../../nano_rl/runtime/backends/vllm_backend.py">vllm_backend.py</a> lines 195, 364-403：必须是 rollout lease，GPU 和 holder 必须匹配当前 replica。</p>
-            </div>
-            <div class="evidence">
-              <p class="label">engine 构造</p>
-              <p class="value"><a href="../../nano_rl/runtime/backends/vllm_backend.py">vllm_backend.py</a> lines 196-208, 464-482：第一次激活时用 <code>vllm.LLM(model=meta.model_path, tokenizer=...)</code> 懒构造。</p>
-            </div>
-            <div class="evidence">
-              <p class="label">engine 通知</p>
-              <p class="value"><a href="../../nano_rl/runtime/backends/vllm_backend.py">vllm_backend.py</a> lines 209-219, 591-603：如果 offloaded 先 wake，再尝试调用 engine 的权重加载 hook。</p>
-            </div>
-          </div>
-
-          <details>
-            <summary>关键代码片段：VllmRolloutBackend.activate_weight()</summary>
-            <pre><code>self._assert_rollout_lease(lease)
-if self._engine is None:
-    config = self._config_for_weight(meta)
-    config.apply_cuda_visible_devices()
-    self._engine = self._engine_factory(config, meta)
-    self._offloaded = False
-if self._offloaded:
-    self.wake(lease=lease)
-_notify_engine_weight(self._engine, meta, transfer_source=transfer_source)
-self._active_weight = meta
-self._active_weight_source = transfer_source</code></pre>
-          </details>
-
-          <details>
-            <summary>关键代码片段：engine 权重热更 hook</summary>
-            <pre><code>def _notify_engine_weight(engine, meta, *, transfer_source=None):
-    for method_name in ("activate_weight", "load_weight", "load_weights"):
-        method = getattr(engine, method_name, None)
-        if method is not None:
-            method(meta, transfer_source=transfer_source)
-            return</code></pre>
-          </details>
+          <p>
+            engine 构造时会传 <code>WeightTransferConfig(backend="ipc"|"nccl")</code>。如果本地 vLLM 版本没有这个 API，
+            且 <code>require_weight_sync=true</code>，会直接报错；这比“继续用旧权重 rollout”安全。
+          </p>
+          <pre><code>weight_transfer_config = WeightTransferConfig(backend=backend)
+vllm.LLM(model=..., tensor_parallel_size=..., weight_transfer_config=weight_transfer_config)</code></pre>
         </section>
 
-        <section id="serving" class="panel">
-          <h2>serving 时如何保证版本</h2>
+        <section id="config" class="panel">
+          <h2>配置入口</h2>
           <p>
-            rollout manager 派发 request 时带上 <code>target_policy_version</code>。vLLM backend 在生成前检查
-            <code>_active_weight.version_id</code> 必须等于目标版本；生成后的 sample 也带 <code>policy_version</code> 和
-            <code>weight_checksum</code>，后续 queue 和 trainer 可以按版本做过滤或统计。
+            新配置在 <code>rollout.vllm</code> 下：
           </p>
+          <pre><code>rollout:
+  backend: vllm
+  vllm:
+    weight_sync_backend: auto
+    require_weight_sync: true</code></pre>
+          <p>
+            <code>auto</code> 在 Ray placement 时按 replica 拓扑落成具体 backend：
+            shared replica 为 <code>ipc</code>，rollout-only 或分卡 replica 为 <code>nccl</code>。
+            也可以显式写 <code>ipc</code>、<code>nccl</code> 或 <code>none</code>。
+          </p>
+        </section>
 
-          <div class="check-grid">
-            <div class="check">
-              <p class="label">派发目标版本</p>
-              <p class="value"><code>dispatch_from_backlog(policy_version, ...)</code> 把当前 active weight version 写进 request。</p>
-            </div>
-            <div class="check">
-              <p class="label">生成前校验</p>
-              <p class="value"><code>VllmRolloutBackend.generate()</code> 在 lines 235-243 校验已激活版本，不匹配就抛错。</p>
-            </div>
-            <div class="check">
-              <p class="label">样本携带元数据</p>
-              <p class="value"><code>GenerationOutput</code> 和 <code>SampleRecord</code> 都保留 <code>policy_version</code>、<code>weight_checksum</code>。</p>
-            </div>
+        <section id="version" class="panel">
+          <h2>版本一致性</h2>
+          <p>
+            同步完成不等于控制面已经对外宣布。vLLM actor 在 <code>finish_weight_update()</code> 后把该
+            <code>version_id</code> 记入 <code>_synced_weight_versions</code>；随后 <code>activate_weight()</code>
+            只更新 backend active metadata，不再走 checkpoint hook。所有 rollout replicas ack 后，
+            <code>WeightRegistryActor</code> 才把版本推进到 <code>ACTIVE_GLOBAL</code>。
+          </p>
+          <div class="note">
+            <p><span class="status">关键点</span> 下个 step rollout 取的是 registry 里 active 的新 version；生成出的 <code>SampleRecord</code> 继续携带 <code>policy_version</code> 和 checksum。</p>
           </div>
         </section>
 
         <section id="limits" class="panel">
-          <h2>实现边界和风险</h2>
-          <div class="callout-grid">
-            <div class="callout red">
-              <p class="label">最重要的边界</p>
-              <p class="value">
-                当前默认 engine factory 返回的是 <code>vllm.LLM(**kwargs)</code>。代码只会在 engine 暴露
-                <code>activate_weight</code>、<code>load_weight</code> 或 <code>load_weights</code> 时真正通知加载新权重。
-                如果 stock vLLM engine 没有这些方法，<code>_notify_engine_weight()</code> 会静默返回，只有 nano-rl 的
-                <code>_active_weight</code> 元数据被切换。
-              </p>
-            </div>
-            <div class="callout amber">
-              <p class="label">怎么补齐真实热更</p>
-              <p class="value">
-                需要一个 vLLM adapter/engine 扩展实现这些 hook，并根据 <code>WeightShardSource.kind</code>
-                做三件事之一：从 shared GPU trainer state reshard、从 artifact/manifest hydrate、或从 Ray object ref materialize。
-              </p>
-            </div>
-            <div class="callout blue">
-              <p class="label">TODO</p>
-              <p class="value">
-                接入 vLLM 原生 Weight Transfer API，用 <code>IPC</code> 覆盖 trainer/rollout colocated 的 shared GPU 更新，
-                用 <code>NCCL</code> 覆盖 trainer 和 rollout 分卡的直接权重广播；checkpoint reload 只作为 fallback 和恢复路径。
-              </p>
-            </div>
-            <div class="callout blue">
-              <p class="label">reload 路径</p>
-              <p class="value">
-                如果采用 <code>teardown_and_reload</code>，<code>wake()</code> 可在 engine 为 None 时用当前
-                <code>_active_weight</code> 重建 engine。当前配置默认更偏向 <code>vllm_sleep</code>，适合未来 in-place update hook。
-              </p>
-            </div>
-            <div class="callout green">
-              <p class="label">失败处理</p>
-              <p class="value">
-                activation 任一 replica 失败时 registry 会 <code>mark_failed</code>，rollout manager 在 finally 中 resume。
-                训练 batch 在 activation 前已经 ack，这符合当前代码，但生产语义是否要 rollback 还需要设计确认。
-              </p>
-            </div>
+          <h2>边界</h2>
+          <div class="note red">
+            <p>
+              当前工作区安装的 vLLM 是 <code>0.8.5</code>，没有 <code>vllm.distributed.weight_transfer</code>。
+              代码已经按新 API lazy import 和 fail-fast 接好，真实 GPU smoke 需要升级到带 Weight Transfer 的 vLLM。
+            </p>
           </div>
+          <p>
+            FSDP 多 rank 场景里，IPC 路径要求所有 trainer ranks 同步参与；NCCL 路径要求 rank0 能提供 vLLM 可加载的完整参数迭代器。
+            这些都是数据面约束，不是 registry 或 checkpoint 能绕开的控制面问题。
+          </p>
         </section>
 
         <section id="tests" class="panel">
-          <h2>测试证据</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>测试</th>
-                <th>覆盖的行为</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><a href="../../tests/test_ray_training_loop.py">tests/test_ray_training_loop.py</a> lines 40-127</td>
-                <td>验证 train step 顺序：rollout offload 早于 trainer initialize，trainer offload 早于 rollout wake，registry register 早于 rollout activate。</td>
-              </tr>
-              <tr>
-                <td><a href="../../tests/test_vllm_backend.py">tests/test_vllm_backend.py</a> lines 95-165</td>
-                <td>用 fake vLLM engine 验证 activate、generate、transfer source 转发和 sample 元数据。</td>
-              </tr>
-              <tr>
-                <td><a href="../../tests/test_weight_transfer.py">tests/test_weight_transfer.py</a> lines 28-64</td>
-                <td>验证 <code>locality_aware_checkpoint</code> 会区分 artifact pull 和 shared GPU reshard，<code>objectref</code> 会生成 object ref source。</td>
-              </tr>
-            </tbody>
-          </table>
-
-          <p class="footer">Generated for repository code state on 2026-05-17.</p>
+          <h2>验证</h2>
+          <p>
+            已补的单测覆盖三件事：vLLM backend 暴露 native update lifecycle；Ray training loop 在 activation ack 前触发 native sync；
+            IPC 路径所有 trainer ranks 参与，NCCL 路径只由 rank0 广播。
+          </p>
+          <pre><code>.venv-nano-rl/bin/python3 -m pytest \
+  tests/test_ray_training_loop.py \
+  tests/test_vllm_backend.py \
+  tests/test_weight_transfer.py \
+  tests/test_ray_placement.py::test_ray_launch_plan_uses_role_scoped_gpu_resources</code></pre>
+          <p class="muted">结果：<code>24 passed</code>。</p>
         </section>
       </div>
     </div>
+
+    <p class="footer">Generated for nano-rl architecture walkthrough.</p>
   </main>
 </body>
 </html>

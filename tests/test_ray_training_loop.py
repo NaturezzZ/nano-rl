@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import pytest
 
-from nano_rl.config import load_launch_config
+from nano_rl.config import RolloutBackendName, load_launch_config
 from nano_rl.runtime.protocols import WeightFormat, WeightMeta
 from nano_rl.runtime.ray.training import RayTrainingLoop
 from nano_rl.runtime.slot import GpuLeaseManagerCore, RoleName
@@ -189,6 +189,88 @@ def test_ray_training_loop_preserves_optimize_error_when_best_effort_offload_fai
     assert "queue.release:batch-1" in operations
     assert not any(item.startswith("queue.ack") for item in operations)
     assert any(item.startswith("rollout.wake:") for item in operations)
+
+
+def test_ray_training_loop_syncs_vllm_weights_before_activation_ack() -> None:
+    config = load_launch_config(ROOT / "recipes/mock_collocated.yaml")
+    config = config.model_copy(
+        update={
+            "rollout": config.rollout.model_copy(
+                update={
+                    "backend": RolloutBackendName.VLLM,
+                    "vllm": config.rollout.vllm.model_copy(update={"weight_sync_backend": "ipc"}),
+                }
+            )
+        }
+    )
+    operations: list[str] = []
+    handles: dict[str, Any] = {}
+    trainer_leases = {}
+    for rank in config.gpu_plan.trainer_ranks:
+        handles[f"trainer-rank-{rank.rank}"] = FakeActor(
+            sync_weights_to_vllm=lambda rollout_handle, meta, source, lease, transport, is_checkpoint_format, rank=rank.rank: operations.append(
+                f"sync:r{rank}:{source['replica_id']}:v{meta['version_id']}:{transport}:{is_checkpoint_format}"
+            )
+        )
+        trainer_leases[rank.rank] = {
+            "gpu_id": rank.gpu_id,
+            "role": "trainer",
+            "holder_id": f"trainer-rank-{rank.rank}",
+            "lease_epoch": 1,
+        }
+    for replica in config.gpu_plan.rollout_replicas:
+        handles[replica.replica_id] = FakeActor()
+
+    loop = RayTrainingLoop(config, SimpleNamespace(handles=handles), ray_module=FakeRay())
+    loop._sync_native_vllm_weights(
+        _weight(version_id=2).model_dump(mode="json"),
+        trainer_leases,
+    )
+
+    assert operations == [
+        f"sync:r{rank.rank}:{replica.replica_id}:v2:ipc:True"
+        for replica in config.gpu_plan.rollout_replicas
+        for rank in config.gpu_plan.trainer_ranks
+    ]
+
+
+def test_ray_training_loop_uses_rank0_for_native_vllm_nccl_sync() -> None:
+    config = load_launch_config(ROOT / "recipes/mock_collocated.yaml")
+    config = config.model_copy(
+        update={
+            "rollout": config.rollout.model_copy(
+                update={
+                    "backend": RolloutBackendName.VLLM,
+                    "vllm": config.rollout.vllm.model_copy(update={"weight_sync_backend": "nccl"}),
+                }
+            )
+        }
+    )
+    operations: list[str] = []
+    handles: dict[str, Any] = {}
+    trainer_leases = {}
+    for rank in config.gpu_plan.trainer_ranks:
+        handles[f"trainer-rank-{rank.rank}"] = FakeActor(
+            sync_weights_to_vllm=lambda rollout_handle, meta, source, lease, transport, is_checkpoint_format, rank=rank.rank: operations.append(
+                f"sync:r{rank}:{source['replica_id']}:{transport}"
+            )
+        )
+        trainer_leases[rank.rank] = {
+            "gpu_id": rank.gpu_id,
+            "role": "trainer",
+            "holder_id": f"trainer-rank-{rank.rank}",
+            "lease_epoch": 1,
+        }
+    for replica in config.gpu_plan.rollout_replicas:
+        handles[replica.replica_id] = FakeActor()
+
+    loop = RayTrainingLoop(config, SimpleNamespace(handles=handles), ray_module=FakeRay())
+    loop._sync_native_vllm_weights(_weight(version_id=3).model_dump(mode="json"), trainer_leases)
+
+    assert operations == [
+        f"sync:r0:{replica.replica_id}:nccl"
+        for replica in config.gpu_plan.rollout_replicas
+    ]
 
 
 def _weight(version_id: int) -> WeightMeta:

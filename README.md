@@ -251,6 +251,8 @@ not by the storage source whitelist.
 | `rollout.vllm.trust_remote_code` | `false` | Passed to vLLM loader. |
 | `rollout.vllm.engine_kwargs` | `{}` | Extra `vllm.LLM` constructor kwargs. |
 | `rollout.vllm.sampling_params` | `{}` | kwargs used to build `vllm.SamplingParams`, such as `temperature`, `top_p`, `max_tokens`. |
+| `rollout.vllm.weight_sync_backend` | `auto`, `ipc`, `nccl`, `none` | Native vLLM Weight Transfer backend used to sync post-step trainer parameters into the rollout engine. `auto` chooses `ipc` for shared-GPU replicas and `nccl` for rollout-only/separate-GPU replicas. |
+| `rollout.vllm.require_weight_sync` | `true` | Fail fast when native vLLM Weight Transfer support is unavailable instead of silently serving stale weights. |
 | `rollout.huggingface.dtype` | `null`, `auto`, `bfloat16`, `float16`, `float32`, etc. | Torch dtype for direct Transformers model loading. |
 | `rollout.huggingface.device` | `auto` | Device string. `auto` chooses `cuda:0` when CUDA is available, otherwise CPU. |
 | `rollout.huggingface.device_map` | `null`, string, or mapping | Optional Transformers `device_map`. |

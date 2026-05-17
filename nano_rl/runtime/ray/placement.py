@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano_rl.config import LaunchConfig, TrainerBackendName
+from nano_rl.runtime.slot import GpuTopology, RolloutReplicaSpec
 
 
 class RayActorSpec(BaseModel):
@@ -108,6 +109,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
     for replica in config.gpu_plan.rollout_replicas:
         rollout_resources = {f"rollout_gpu_{gpu_id}": 1 for gpu_id in replica.gpu_ids}
         node_custom_resources.update(rollout_resources)
+        vllm_weight_sync_backend = _vllm_weight_sync_backend_for_replica(config, replica)
         actors.append(
             RayActorSpec(
                 name=replica.replica_id,
@@ -130,6 +132,8 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "trust_remote_code": config.rollout.vllm.trust_remote_code,
                         "engine_kwargs": _vllm_engine_kwargs(config),
                         "sampling_params": config.rollout.vllm.sampling_params,
+                        "weight_sync_backend": vllm_weight_sync_backend,
+                        "require_weight_sync": config.rollout.vllm.require_weight_sync,
                         "gpu_ids": list(replica.gpu_ids),
                         "holder_ids": list(replica.worker_ids),
                         "offload_strategy": toggle_offload.rollout_engine,
@@ -148,6 +152,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                     "worker_ids": list(replica.worker_ids),
                     "backend": config.rollout.backend,
                     "weight_transfer_method": config.weight_transfer.method,
+                    "weight_sync_backend": vllm_weight_sync_backend,
                 },
             )
         )
@@ -257,6 +262,15 @@ def _vllm_engine_kwargs(config: LaunchConfig) -> dict[str, Any]:
     if config.runtime.ray.gpu_manager.hybrid_toggle.offload.rollout_engine == "vllm_sleep":
         engine_kwargs["enable_sleep_mode"] = True
     return engine_kwargs
+
+
+def _vllm_weight_sync_backend_for_replica(config: LaunchConfig, replica: RolloutReplicaSpec) -> str:
+    configured = config.rollout.vllm.weight_sync_backend
+    if configured != "auto":
+        return configured
+    if replica.topology == GpuTopology.SHARED:
+        return "ipc"
+    return "nccl"
 
 
 def _validate_role_resource_uniqueness(actors: list[RayActorSpec]) -> None:

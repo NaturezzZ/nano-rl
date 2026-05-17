@@ -163,6 +163,23 @@ class TrainerBackend(ABC):
     def offload(self, *, lease: GpuLease) -> TrainStateBundle:
         """Move model/optimizer state out of GPU residency after lease validation."""
 
+    def sync_weights_to_vllm(
+        self,
+        *,
+        rollout_handle: Any,
+        meta: WeightMeta,
+        transfer_source: Mapping[str, Any] | None,
+        lease: GpuLease,
+        transport: Literal["ipc", "nccl"] = "ipc",
+        is_checkpoint_format: bool = True,
+    ) -> dict[str, Any]:
+        """Send current in-memory trainer weights to a vLLM rollout actor."""
+
+        del rollout_handle, meta, transfer_source, lease, transport, is_checkpoint_format
+        raise BackendStateError(
+            f"{type(self).__name__} does not implement native vLLM weight synchronization"
+        )
+
     def _assert_trainer_lease(self, lease: GpuLease) -> None:
         if lease.role != RoleName.TRAINER:
             raise SlotStateError(f"trainer rank {self.config.rank} lease role is {lease.role}, not trainer")

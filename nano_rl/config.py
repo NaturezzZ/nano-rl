@@ -405,6 +405,8 @@ class VllmRolloutConfig(BaseModel):
     trust_remote_code: bool = False
     engine_kwargs: dict[str, Any] = Field(default_factory=dict)
     sampling_params: dict[str, Any] = Field(default_factory=dict)
+    weight_sync_backend: Literal["auto", "ipc", "nccl", "none"] = "auto"
+    require_weight_sync: bool = True
 
 
 class HuggingFaceRolloutConfig(BaseModel):

@@ -69,6 +69,9 @@ def test_ray_launch_plan_uses_role_scoped_gpu_resources() -> None:
     assert rollout_backend_config["holder_ids"] == ["rollout-dp-2-tp-0", "rollout-dp-2-tp-1"]
     assert rollout_backend_config["engine_kwargs"]["enable_sleep_mode"] is True
     assert rollout_backend_config["residual_gpu_memory_budget_mb"] == 2048
+    assert rollout_backend_config["weight_sync_backend"] == "ipc"
+    rollout_only_replica = next(actor for actor in plan.actors if actor.name == "rollout-dp-0")
+    assert rollout_only_replica.init_args[3]["weight_sync_backend"] == "nccl"
     trainer_rank = next(actor for actor in plan.actors if actor.name == "trainer-rank-0")
     assert trainer_rank.num_gpus == 0
     assert trainer_rank.resources == {"train_gpu_4": 1}

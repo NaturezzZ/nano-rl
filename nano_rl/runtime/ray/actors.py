@@ -307,6 +307,60 @@ def build_rollout_replica_controller_actor_class():
             )
             return state
 
+        def init_weight_transfer_engine(self, init_info: dict[str, object]) -> dict[str, object]:
+            if self._backend is None:
+                raise RuntimeError("rollout backend is required for native weight sync")
+            result = self._backend.init_weight_transfer_engine(init_info)
+            logger.info(
+                "RolloutReplicaControllerActor init_weight_transfer_engine completed: replica_id=%s world_size=%s",
+                self._role.replica_id,
+                init_info.get("world_size"),
+            )
+            return result
+
+        def start_weight_update(
+            self,
+            meta: dict[str, object],
+            transfer_source: dict[str, object] | None = None,
+            is_checkpoint_format: bool = False,
+        ) -> dict[str, object]:
+            if self._backend is None:
+                raise RuntimeError("rollout backend is required for native weight sync")
+            weight = WeightMeta.model_validate(meta)
+            parsed_source = None if transfer_source is None else WeightShardSource.model_validate(transfer_source)
+            logger.info(
+                "RolloutReplicaControllerActor start_weight_update started: replica_id=%s version=%s",
+                self._role.replica_id,
+                weight.version_id,
+            )
+            result = self._backend.start_weight_update(
+                weight,
+                transfer_source=parsed_source,
+                is_checkpoint_format=is_checkpoint_format,
+            )
+            logger.info(
+                "RolloutReplicaControllerActor start_weight_update completed: replica_id=%s version=%s",
+                self._role.replica_id,
+                weight.version_id,
+            )
+            return result
+
+        def update_weights(self, update_info: dict[str, object]) -> dict[str, object]:
+            if self._backend is None:
+                raise RuntimeError("rollout backend is required for native weight sync")
+            return self._backend.update_weights(update_info)
+
+        def finish_weight_update(self) -> dict[str, object]:
+            if self._backend is None:
+                raise RuntimeError("rollout backend is required for native weight sync")
+            result = self._backend.finish_weight_update()
+            logger.info(
+                "RolloutReplicaControllerActor finish_weight_update completed: replica_id=%s version=%s",
+                self._role.replica_id,
+                result.get("version_id"),
+            )
+            return result
+
         def state(self) -> dict[str, object]:
             backend_active_weight = None if self._backend is None else getattr(self._backend, "active_weight", None)
             backend_active_source = None if self._backend is None else getattr(self._backend, "active_weight_source", None)
@@ -550,6 +604,40 @@ def build_trainer_rank_actor_class():
                 exported.version_id,
             )
             return exported.model_dump(mode="json")
+
+        def sync_weights_to_vllm(
+            self,
+            rollout_handle: object,
+            meta: dict[str, object],
+            transfer_source: dict[str, object] | None,
+            lease: dict[str, object],
+            transport: str = "ipc",
+            is_checkpoint_format: bool = True,
+        ) -> dict[str, object]:
+            if self._backend is None:
+                raise RuntimeError("trainer backend is required for native vLLM weight sync")
+            weight = WeightMeta.model_validate(meta)
+            parsed_lease = GpuLease.model_validate(lease)
+            logger.info(
+                "TrainerRankActor sync_weights_to_vllm started: rank=%s version=%s transport=%s",
+                self._role.rank,
+                weight.version_id,
+                transport,
+            )
+            result = self._backend.sync_weights_to_vllm(
+                rollout_handle=rollout_handle,
+                meta=weight,
+                transfer_source=transfer_source,
+                lease=parsed_lease,
+                transport=transport,  # type: ignore[arg-type]
+                is_checkpoint_format=is_checkpoint_format,
+            )
+            logger.info(
+                "TrainerRankActor sync_weights_to_vllm completed: rank=%s version=%s",
+                self._role.rank,
+                weight.version_id,
+            )
+            return result
 
         def offload(self, lease: dict[str, object]) -> dict[str, object] | None:
             if self._backend is None:
