@@ -20,7 +20,7 @@
 
 这份方案的目标不是另写一个绕过主链路的测试脚本，而是把 mock 变成正式 runtime backend：
 
-1. `rollout.backend: vllm | mock`；
+1. `rollout.backend: vllm | huggingface | mock`；
 2. `trainer.backend: fsdp2 | mock`；
 3. `data.source_type` 支持真实 HDFS/HDFS-FUSE 以及 mock data；
 4. 权重 load/store/transfer 支持真实 checkpoint/artifact 以及 mock memory/file manifest；
@@ -126,7 +126,7 @@ mock 只替换叶子模块和外部边界，不替换 loop 语义源。
 
 | 范围 | 生产实现 | Mock 实现 | 统一接口 | 必须保留的不变量 |
 | --- | --- | --- | --- | --- |
-| Rollout GPU compute | vLLM engine | deterministic mock rollout engine | `RolloutBackend` | rollout lease、active weight、policy_version、checksum、tokens/logprobs |
+| Rollout GPU compute | vLLM engine or direct Hugging Face Transformers generation | deterministic mock rollout engine | `RolloutBackend` | rollout lease、active weight、policy_version、checksum、tokens/logprobs |
 | Trainer GPU compute | PyTorch FSDP2 | deterministic mock trainer | `TrainerBackend` | trainer lease、rank/world_size、train_step、weight export |
 | Offload / hydrate | vLLM sleep、FSDP2 model/optimizer offload | backend 内 state-only transition | `RolloutBackend` / `TrainerBackend` + `GpuResidencyManagerCore` | shared GPU role exclusivity |
 | Weight store | checkpoint dir、artifact/manifest path | memory store 或 local JSON manifest | `WeightStore` | version、parent、checksum、format、status |
@@ -663,7 +663,7 @@ trainer:
 - `MockGeneratedDataConfig`
 - `MockJsonlDataConfig`
 - `TrainerBackendName = Literal["fsdp2", "mock"]`
-- `RolloutBackendName = Literal["vllm", "mock"]`
+- `RolloutBackendName = Literal["vllm", "huggingface", "mock"]`
 - `MockTrainerConfig`
 - `VllmConfig`
 - `MockRolloutConfig`
@@ -693,6 +693,7 @@ trainer:
 - `trainer.backend=fsdp2` 时 `trainer.fsdp2` 必填；
 - `trainer.backend=mock` 时禁止要求 `trainer.checkpoint_dir`；
 - `rollout.backend=vllm` 时真实 actor start 需要 vLLM 可 import，但 config parse 不 import；
+- `rollout.backend=huggingface` 时真实 actor start 需要 `transformers` 和 `torch` 可 import，但 config parse 不 import；
 - `rollout.backend=mock` 时 `rollout.mock` 可选，有默认 deterministic 配置；
 - `data.source_type` 必须出现在 `runtime.storage.allowed_input_sources`，或者 mock source 被 `mock.enabled=true` 显式允许；
 - `mock.strict.no_external_data_probe=true` 时 mock data source 不走 HDFS probe；
@@ -726,7 +727,11 @@ trainer:
 
 - `nano_rl/runtime/backends/vllm_backend.py`
   - 保留协议；
-  - `build_rollout_backend()` 按 backend name 分发到 vLLM 或 mock。
+  - `build_rollout_backend()` 按 backend name 分发到 vLLM、Hugging Face 或 mock。
+
+- `nano_rl/runtime/backends/huggingface_backend.py`
+  - `HuggingFaceRolloutBackend`
+  - lazy-import `transformers` / `torch`，并实现同一个 `RolloutBackend` protocol。
 
 - `nano_rl/runtime/backends/trainer_backend.py`
   - 将 `FakeTrainerBackend` 正式化为 `MockTrainerBackend`；
@@ -1081,6 +1086,7 @@ actor 内部：
 ```text
 build_rollout_backend(config)
   -> MockRolloutBackend if backend=mock
+  -> HuggingFaceRolloutBackend if backend=huggingface
   -> VllmRolloutBackend if backend=vllm
 ```
 

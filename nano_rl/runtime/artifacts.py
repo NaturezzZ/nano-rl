@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import subprocess
 from pathlib import Path
 
@@ -24,14 +25,25 @@ def _validate_source(field: str, source_type: SourceType, uri: str | None, confi
     if source_type in {SourceType.MOCK_INLINE, SourceType.MOCK_GENERATED}:
         return
 
-    if source_type == SourceType.MOCK_JSONL:
+    if source_type in {SourceType.LOCAL_CSV, SourceType.MOCK_JSONL}:
         if uri is None:
-            raise InvalidInputArtifactError(f"{field} is required for mock_jsonl")
+            raise InvalidInputArtifactError(f"{field} is required for {source_type.value}")
         path = Path(uri)
         if not path.exists():
-            raise InvalidInputArtifactError(f"{field} mock_jsonl file does not exist: {uri}")
+            raise InvalidInputArtifactError(f"{field} {source_type.value} file does not exist: {uri}")
         if not path.is_file():
-            raise InvalidInputArtifactError(f"{field} mock_jsonl path is not a file: {uri}")
+            raise InvalidInputArtifactError(f"{field} {source_type.value} path is not a file: {uri}")
+        if source_type == SourceType.LOCAL_CSV:
+            encoding = config.data.local_csv.encoding if config.data.local_csv else "utf-8"
+            with path.open("r", encoding=encoding, newline="") as handle:
+                reader = csv.DictReader(handle)
+                if reader.fieldnames is None:
+                    raise InvalidInputArtifactError(f"{field} local_csv file must include a header row: {uri}")
+                if config.data.prompt_column not in reader.fieldnames:
+                    raise InvalidInputArtifactError(
+                        f"{field} local_csv header is missing prompt_column "
+                        f"{config.data.prompt_column!r}: {uri}"
+                    )
         return
 
     if uri is None:

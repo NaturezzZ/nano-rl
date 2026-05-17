@@ -418,14 +418,14 @@
       <h2>架构总览</h2>
       <p>
         nano-rl v0.1 的核心目标是做一个“小而全”的 RL 框架：trainer 后端目标是 PyTorch FSDP2，
-        rollout 后端目标是 vLLM，执行层固定为单机 Ray-native actor runtime。控制器拥有 loop 语义；
+        rollout 后端支持 vLLM、直接 Hugging Face Transformers 和 mock，执行层固定为单机 Ray-native actor runtime。控制器拥有 loop 语义；
         trainer、rollout、reward、queue、weight registry 和 metrics 都是可替换后端或服务边界。
       </p>
       <div class="pill-row">
         <span class="pill">YAML-first</span>
         <span class="pill">Ray-native</span>
         <span class="pill">FSDP2 trainer</span>
-        <span class="pill">vLLM rollout</span>
+        <span class="pill">vLLM / HuggingFace rollout</span>
         <span class="pill">policy_version accounting</span>
         <span class="pill">bounded staleness</span>
         <span class="pill">single-machine v0.1</span>
@@ -445,7 +445,7 @@
         </div>
         <div class="box">
           <h3>Execution backends</h3>
-          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM / FSDP2 backend adapter，<code>RayTrainingLoop</code> 会在 graph 启动后串接 rollout、reward、sample queue、trainer、weight registry、weight activation，以及 shared GPU train window 前后的 rollout offload/wake 和 trainer CPU standby。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph 并执行训练循环。</p>
+          <p><code>RayActorGraphLauncher</code> 已能按 <code>RayLaunchPlan</code> 创建 actor graph；启动真实 graph 前会先 connect-or-create Ray cluster。Ray actor wrappers 已接入 vLLM、Hugging Face、mock rollout adapter 与 FSDP2/mock trainer adapter，<code>RayTrainingLoop</code> 会在 graph 启动后串接 rollout、reward、sample queue、trainer、weight registry、weight activation，以及 shared GPU train window 前后的 rollout offload/wake 和 trainer CPU standby。<code>run.start_ray_actors</code> 控制 train 路径是只输出 plan，还是实际启动 Ray actor graph 并执行训练循环。</p>
         </div>
       </div>
     </section>
@@ -716,7 +716,7 @@
       <div class="grid-2">
         <div class="box">
           <h3><code>main.py</code> 与配置加载</h3>
-          <p>用户入口只负责读取 YAML、处理 <code>run.intent</code>、归一化 mode、校验 artifact 和资源拓扑、将 resolved config 写入被 git ignore 的 <code>.nano_rl/resolved-config.json</code>，并生成不可变 <code>LaunchConfig</code>。训练参数不应拆成命令行覆盖面。</p>
+          <p>用户入口只负责读取 YAML、处理 <code>run.intent</code>、归一化 mode、校验 artifact 和资源拓扑、将 resolved config 写入被 git ignore 的 <code>.nano_rl/resolved-config.json</code>，并生成不可变 <code>LaunchConfig</code>。数据源必须显式声明为 <code>hdfs_uri</code>、<code>hdfs_fuse_path</code>、<code>local_csv</code> 或 mock source，并列入 <code>runtime.storage.allowed_input_sources</code>。训练参数不应拆成命令行覆盖面。</p>
         </div>
         <div class="box">
           <h3>Ray Driver</h3>
@@ -736,15 +736,15 @@
         </div>
         <div class="box">
           <h3>Lease toggle</h3>
-          <p>默认策略是 <code>swap_on_toggle</code>，只对 <code>shared_gpus</code> 启用。rollout -> train 时 shared replicas drain、flush sample、释放 vLLM/KV cache，然后 lease 切给 trainer ranks；rollout-only GPUs 收到 trainer lease 必须 fail-fast。</p>
+          <p>默认策略是 <code>swap_on_toggle</code>，只对 <code>shared_gpus</code> 启用。rollout -> train 时 shared replicas drain、flush sample、释放 rollout backend 的 engine/model/KV cache，然后 lease 切给 trainer ranks；rollout-only GPUs 收到 trainer lease 必须 fail-fast。</p>
         </div>
         <div class="box">
           <h3>FSDP2 Trainer</h3>
           <p><code>TrainerCoordinatorActor</code> 汇总自动分配到 <code>shared_gpus</code> 的 ranks，建立 rank/world size 和稳定通信组；<code>TrainerRankActor</code> 已接入 <code>Fsdp2TrainerBackend</code> adapter。真实 FSDP2 执行依赖可加载模型、<code>trainer.checkpoint_dir</code> 与多 rank rendezvous/store endpoint；rank 初始化后和每轮 train 后都应处于 CPU standby，queue ack 必须晚于 optimizer step 与 trainer offload 成功。</p>
         </div>
         <div class="box">
-          <h3>vLLM Rollout</h3>
-          <p><code>RolloutManagerActor</code> 选择 prompt 与 target policy version，分发到 rollout DP replicas。每个 <code>RolloutReplicaControllerActor</code> 按 TP 组持有 <code>rollout_gpu_i</code> custom resources，并通过 <code>VllmRolloutBackend</code> adapter 激活权重和生成 response。</p>
+          <h3>Rollout Backends</h3>
+          <p><code>RolloutManagerActor</code> 选择 prompt 与 target policy version，分发到 rollout DP replicas。每个 <code>RolloutReplicaControllerActor</code> 按 TP 组持有 <code>rollout_gpu_i</code> custom resources，并按 <code>rollout.backend</code> 构造 vLLM、Hugging Face 或 mock adapter 激活权重和生成 response。</p>
         </div>
         <div class="box">
           <h3><code>SampleQueueActor</code></h3>
@@ -836,13 +836,13 @@
           <tr>
             <td><code>RolloutReplicaControllerActor</code></td>
             <td>TP group logical rollout GPU resources</td>
-            <td>每个 rollout DP replica 一个；按 TP 组占用 <code>rollout_gpu_i</code> custom resources，构造 vLLM backend adapter，管理权重激活、drain/offload/wake 和 replica failure。</td>
+            <td>每个 rollout DP replica 一个；按 TP 组占用 <code>rollout_gpu_i</code> custom resources，构造 rollout backend adapter，管理权重激活、drain/offload/wake 和 replica failure。</td>
             <td>接收 <code>RolloutManagerActor</code> 请求；协调多个 TP workers；以 replica 为单位 ack activation；执行 CUDA 前校验 rollout leases。</td>
           </tr>
           <tr>
             <td><code>RolloutWorkerActor</code></td>
             <td><code>num_gpus=0</code> TP rank role</td>
-            <td>每个 vLLM TP rank 一个；不申请 Ray GPU token，维护 TP rank 元数据和未来 worker/shard 边界。</td>
+            <td>每个 rollout TP rank 一个；不申请 Ray GPU token，维护 TP rank 元数据和未来 worker/shard 边界。</td>
             <td>CUDA-facing 行为必须通过 rollout lease 与 replica/backend gate；不单独抢占 <code>rollout_gpu_i</code> resource。</td>
           </tr>
           <tr>

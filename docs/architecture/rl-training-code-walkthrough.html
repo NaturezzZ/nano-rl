@@ -379,7 +379,7 @@
     <header class="hero">
       <p class="eyebrow">Code Walkthrough</p>
       <h1>nano-rl RL 训练流程代码走读</h1>
-      <p class="subtitle">这份报告按当前仓库内容展开，从 YAML 配置入口、GPU 拓扑自动分配、Ray actor graph、vLLM/FSDP2 backend adapter、rollout 采样、SampleQueue、train window、权重发布与回切，完整走读一轮 RL 训练在代码里如何被表达。</p>
+      <p class="subtitle">这份报告按当前仓库内容展开，从 YAML 配置入口、GPU 拓扑自动分配、Ray actor graph、rollout/trainer backend adapter、rollout 采样、SampleQueue、train window、权重发布与回切，完整走读一轮 RL 训练在代码里如何被表达。</p>
       <div class="meta-grid">
         <article class="meta-card">
           <p class="meta-label">生成时间</p>
@@ -395,7 +395,7 @@
         </article>
         <article class="meta-card">
           <p class="meta-label">验证</p>
-          <p class="meta-value"><code>python3 -m pytest -q</code>：72 passed</p>
+          <p class="meta-value"><code>PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q</code>：133 passed</p>
         </article>
       </div>
       <div class="highlight-grid">
@@ -409,7 +409,7 @@
         </article>
         <article class="highlight-card warn">
           <p class="highlight-label">后端接线状态</p>
-          <p class="highlight-value">Ray actor 已接入 vLLM/FSDP2 backend adapter；真实 GPU 运行仍依赖环境、模型 artifact、checkpoint 与 rendezvous。</p>
+          <p class="highlight-value">Ray actor 已接入 vLLM、Hugging Face、mock rollout adapter 与 FSDP2/mock trainer adapter；真实 GPU 运行仍依赖环境、模型 artifact、checkpoint 与 rendezvous。</p>
         </article>
       </div>
     </header>
@@ -427,7 +427,7 @@
           <li><a href="#rollout">Rollout 子系统</a></li>
           <li><a href="#queue-registry">Queue 与权重注册表</a></li>
           <li><a href="#trainer">Trainer 与 train window</a></li>
-          <li><a href="#backends">vLLM / FSDP2 后端边界</a></li>
+          <li><a href="#backends">后端边界</a></li>
           <li><a href="#tests">测试覆盖与成熟度</a></li>
           <li><a href="#reading">建议阅读顺序</a></li>
         </ol>
@@ -436,8 +436,8 @@
       <div class="content">
         <section class="panel" id="summary">
           <h2>当前实现摘要</h2>
-          <p>当前仓库已经不是纯设计文档状态，而是一个 <strong>设计优先、早期后端接线</strong> 的 Python runtime。主入口 <a href="../../main.py"><code>main.py</code></a> 负责读取 YAML、校验并生成 <code>LaunchConfig</code>；<a href="../../nano_rl/runtime/controller.py"><code>ControllerCore</code></a> 负责把本地可测试的 rollout、queue、trainer、weight registry、GPU lease/offload 串起来；Ray 层已经把 actor graph、资源放置和 vLLM/FSDP2 backend adapter 接起来。</p>
-          <p>要注意一点：<code>RayDriver.train()</code> 的启动语义由 YAML 控制。<code>run.start_ray_actors: false</code> 时返回规划后的 backend-integrated runtime plan；<code>run.start_ray_actors: true</code> 时才会启动真实 Ray actor graph。actor wrapper 会懒构造 <code>VllmRolloutBackend</code> 和 <code>Fsdp2TrainerBackend</code>，但 CPU-only 最完整的端到端训练形态仍是 <a href="../../scripts/smoke_local_runtime.py"><code>scripts/smoke_local_runtime.py</code></a> 的 deterministic local iteration。</p>
+          <p>当前仓库已经不是纯设计文档状态，而是一个 <strong>设计优先、早期后端接线</strong> 的 Python runtime。主入口 <a href="../../main.py"><code>main.py</code></a> 负责读取 YAML、校验并生成 <code>LaunchConfig</code>；<a href="../../nano_rl/runtime/controller.py"><code>ControllerCore</code></a> 负责把本地可测试的 rollout、queue、trainer、weight registry、GPU lease/offload 串起来；Ray 层已经把 actor graph、资源放置和 rollout/trainer backend adapter 接起来。</p>
+          <p>要注意一点：<code>RayDriver.train()</code> 的启动语义由 YAML 控制。<code>run.start_ray_actors: false</code> 时返回规划后的 backend-integrated runtime plan；<code>run.start_ray_actors: true</code> 时才会启动真实 Ray actor graph。actor wrapper 会按 <code>rollout.backend</code> 懒构造 vLLM、Hugging Face 或 mock rollout backend，并按 trainer 配置构造 FSDP2/mock backend；CPU-only 最完整的端到端训练形态仍是 <a href="../../scripts/smoke_local_runtime.py"><code>scripts/smoke_local_runtime.py</code></a> 的 deterministic local iteration。</p>
           <div class="callout">
             <strong>结论：</strong>现在的代码已经把交互协议、状态机、资源规划、Ray actor graph 和 backend adapter 连起来了；真实 GPU 训练还需要满足 Ray/vLLM/PyTorch/FSDP2 依赖、模型与 checkpoint artifact，以及多 rank rendezvous。
           </div>
@@ -489,8 +489,8 @@
             <div class="flow-step"><strong>用户模式归一化。</strong> 用户只写 <code>collocated</code> 或 <code>disaggregated</code>；内部 canonical mode 分别是 <code>fully_sync</code> 和 <code>standalone_hybrid</code>。</div>
             <div class="flow-step"><strong>跨字段约束。</strong> <code>RuntimeConfig._validate_cross_fields()</code> 校验 <code>trainer.num_ranks == shared_gpus</code>、<code>rollout.num_replicas * gpus_per_replica == rollout_only_gpus + shared_gpus</code>、TP 分组可整除、FSDP world size 对齐等。</div>
             <div class="flow-step"><strong>GPU plan 自动展开。</strong> <code>LaunchConfig.from_runtime_config()</code> 调用 <code>_build_gpu_plan()</code>，把数量型 YAML 展开成 <code>rollout_replicas</code>、<code>rollout_workers</code>、<code>trainer_ranks</code>。</div>
-            <div class="flow-step"><strong>启动开关。</strong> <code>run.start_ray_actors</code> 是是否真正创建 Ray actor graph 的唯一 YAML 开关；示例默认 <code>false</code>，但仍会生成带 vLLM/FSDP2 adapter 参数的 <code>ray_launch_plan</code>。</div>
-            <div class="flow-step"><strong>checkpoint 位置。</strong> <code>trainer.checkpoint_dir</code> 进入每个 <code>TrainerRankActor</code> 的 backend config，rank0/exporter 用它写出 versioned checkpoint 供 rollout/vLLM reload。</div>
+            <div class="flow-step"><strong>启动开关。</strong> <code>run.start_ray_actors</code> 是是否真正创建 Ray actor graph 的唯一 YAML 开关；示例默认 <code>false</code>，但仍会生成带 rollout/trainer adapter 参数的 <code>ray_launch_plan</code>。</div>
+            <div class="flow-step"><strong>checkpoint 位置。</strong> <code>trainer.checkpoint_dir</code> 进入每个 <code>TrainerRankActor</code> 的 backend config，rank0/exporter 用它写出 versioned checkpoint 供 rollout backend reload。</div>
           </div>
           <p>这正好对应你前面要求的“不要手动指定 gpu id，只给数量”。例如 disaggregated 示例只写 <code>rollout_only_gpus: 4</code>、<code>shared_gpus: 4</code>、<code>rollout.data_parallel_size: 4</code>、<code>rollout.tensor_parallel_size: 2</code>、<code>trainer.num_ranks: 4</code>。运行 resolved config 后，系统决定具体映射：</p>
           <pre><code>rollout-dp-0: gpu0, gpu1     rollout_only
@@ -898,10 +898,10 @@ TRAINER_ACTIVE
 
         <section class="panel" id="tests">
           <h2>测试覆盖与成熟度</h2>
-          <p>当前测试套件已经覆盖配置归一化、GPU lease、offload 状态机、queue/registry、coordinator、Ray placement/launcher、vLLM 后端 adapter、FSDP2 后端 adapter 和 smoke script。最新验证结果：</p>
-          <pre><code>$ python3 -m pytest -q
+          <p>当前测试套件已经覆盖配置归一化、GPU lease、offload 状态机、queue/registry、coordinator、Ray placement/launcher、vLLM/Hugging Face/mock rollout adapter、FSDP2/mock trainer adapter 和 smoke script。最新验证结果：</p>
+          <pre><code>$ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q
 ........................................................................
-72 passed in 2.14s</code></pre>
+133 passed in 5.90s</code></pre>
           <table>
             <thead>
               <tr>
@@ -944,7 +944,7 @@ TRAINER_ACTIVE
             <li>读 <a href="../../nano_rl/config.py"><code>nano_rl/config.py</code></a> 的 <code>RuntimeConfig._validate_cross_fields()</code> 和 <code>_build_gpu_plan()</code>，看数量如何展开成具体 GPU plan。</li>
             <li>读 <a href="../../nano_rl/runtime/slot.py"><code>slot.py</code></a> 和 <a href="../../nano_rl/runtime/offload.py"><code>offload.py</code></a>，理解共享 GPU 不是靠 Ray GPU token，而是靠 custom resource + lease + residency state。</li>
             <li>读 <a href="../../nano_rl/runtime/ray/placement.py"><code>ray/placement.py</code></a> 和 <a href="../../nano_rl/runtime/ray/actors.py"><code>ray/actors.py</code></a>，看 backend config 如何进入 rollout replica actor 和 trainer rank actor。</li>
-            <li>读 <a href="../../nano_rl/runtime/backends/vllm_backend.py"><code>vllm_backend.py</code></a> 和 <a href="../../nano_rl/runtime/backends/fsdp2_backend.py"><code>fsdp2_backend.py</code></a>，确认 vLLM/FSDP2 adapter 的真实调用边界、lazy import 和 fail-fast 条件。</li>
+            <li>读 <a href="../../nano_rl/runtime/backends/vllm_backend.py"><code>vllm_backend.py</code></a>、<a href="../../nano_rl/runtime/backends/huggingface_backend.py"><code>huggingface_backend.py</code></a> 和 <a href="../../nano_rl/runtime/backends/fsdp2_backend.py"><code>fsdp2_backend.py</code></a>，确认 rollout/trainer adapter 的真实调用边界、lazy import 和 fail-fast 条件。</li>
             <li>读 <a href="../../nano_rl/runtime/controller.py"><code>controller.py</code></a> 的 <code>run_smoke_iteration()</code>，这是当前 CPU-only 最完整的一轮 RL 训练主线。</li>
             <li>顺着主线读 <a href="../../nano_rl/runtime/coordinators.py"><code>coordinators.py</code></a>、<a href="../../nano_rl/runtime/sample_queue.py"><code>sample_queue.py</code></a>、<a href="../../nano_rl/runtime/weight_registry.py"><code>weight_registry.py</code></a>、<a href="../../nano_rl/runtime/roles.py"><code>roles.py</code></a>。</li>
             <li>最后读 <a href="../../nano_rl/runtime/ray/driver.py"><code>ray/driver.py</code></a> 和 <a href="../../nano_rl/runtime/ray/launcher.py"><code>ray/launcher.py</code></a>，看 <code>run.start_ray_actors</code> 如何控制 plan-only 与真实 actor graph 启动。</li>

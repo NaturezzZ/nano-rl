@@ -1,8 +1,0 @@
-# Linux NVIDIA GPU install path for the torch 2.4 runtime target.
-#
-# PyTorch 2.4.0 provides CUDA 12.1 wheels, and vLLM 0.6.1.post2 pins
-# torch==2.4.0. FSDP2 is provided by PyTorch, so there is no separate fsdp2
-# package to install.
---extra-index-url https://download.pytorch.org/whl/cu121
-
--r requirements.txt

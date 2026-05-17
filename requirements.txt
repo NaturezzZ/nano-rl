@@ -1,15 +1,26 @@
-# Base dependencies for config validation, local smoke tests, and the first
-# single-machine Ray/FSDP2/vLLM runtime implementation.
-pydantic>=2.0
-pyyaml>=6.0
-ray[default]
-huggingface-hub>=0.25
-datasets>=2.19
-transformers>=4.51
-safetensors>=0.4
-tokenizers>=0.20
-# FSDP2 is part of PyTorch; there is no standalone fsdp2 package. vLLM 0.6.1
-# pins torch==2.4.0, so keep these aligned when targeting torch 2.4.
-torch==2.4.0
-vllm==0.6.1.post2; platform_system == "Linux"
-pytest>=8.0
+# nano-rl real local GPU environment.
+#
+# This file targets a clean virtualenv for the single-machine Ray + vLLM +
+# PyTorch FSDP2 path. It intentionally does not mirror the pre-provisioned
+# worker image, whose torch 2.4 / vLLM 0.6 stack is too old for Qwen3.
+pydantic==2.11.7
+PyYAML==6.0.2
+numpy==1.26.4
+# Ray is supplied by the GPU worker image. Keep this pin aligned with the
+# installed worker version and create the virtualenv with --system-site-packages
+# so pip treats it as already satisfied instead of upgrading it.
+ray==2.43.0
+huggingface-hub==0.31.4
+datasets==3.6.0
+transformers==4.52.4
+tokenizers==0.21.1
+safetensors==0.5.3
+accelerate==1.7.0
+sentencepiece==0.2.0
+
+# FSDP2 is part of PyTorch; there is no standalone fsdp2 package.
+# vLLM 0.8.5 has day-zero Qwen3 support and expects a newer torch stack.
+torch==2.6.0
+vllm==0.8.5; platform_system == "Linux"
+
+pytest==8.3.5

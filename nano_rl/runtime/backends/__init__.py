@@ -1,6 +1,13 @@
 """Runtime backend boundaries."""
 
 from nano_rl.runtime.backends.fsdp2_backend import Fsdp2TrainerBackend
+from nano_rl.runtime.backends.huggingface_backend import (
+    HuggingFaceBackendConfig,
+    HuggingFaceBackendError,
+    HuggingFaceBackendUnavailable,
+    HuggingFaceRolloutBackend,
+    build_huggingface_rollout_backend,
+)
 from nano_rl.runtime.backends.mock_rollout_backend import (
     MockRolloutBackend,
     MockRolloutBackendConfig,
@@ -36,6 +43,10 @@ __all__ = [
     "FakeTrainerBackend",
     "Fsdp2TrainerBackend",
     "GenerationOutput",
+    "HuggingFaceBackendConfig",
+    "HuggingFaceBackendError",
+    "HuggingFaceBackendUnavailable",
+    "HuggingFaceRolloutBackend",
     "MockRolloutBackend",
     "MockRolloutBackendConfig",
     "MockRolloutBackendError",
@@ -50,6 +61,7 @@ __all__ = [
     "VllmBackendError",
     "VllmBackendUnavailable",
     "VllmRolloutBackend",
+    "build_huggingface_rollout_backend",
     "build_rollout_backend",
     "build_mock_rollout_backend",
     "build_trainer_backend",

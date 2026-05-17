@@ -45,6 +45,7 @@ class CanonicalMode(StrEnum):
 class SourceType(StrEnum):
     HDFS_URI = "hdfs_uri"
     HDFS_FUSE_PATH = "hdfs_fuse_path"
+    LOCAL_CSV = "local_csv"
     MOCK_INLINE = "mock_inline"
     MOCK_GENERATED = "mock_generated"
     MOCK_JSONL = "mock_jsonl"
@@ -58,6 +59,7 @@ class TrainerBackendName(StrEnum):
 
 class RolloutBackendName(StrEnum):
     VLLM = "vllm"
+    HUGGINGFACE = "huggingface"
     MOCK = "mock"
 
 
@@ -270,6 +272,10 @@ class MockJsonlDataConfig(BaseModel):
     encoding: str = "utf-8"
 
 
+class LocalCsvDataConfig(BaseModel):
+    encoding: str = "utf-8"
+
+
 class MockDataProfileConfig(BaseModel):
     enabled: bool = False
     sleep_enabled: bool = False
@@ -297,6 +303,7 @@ class DataConfig(BaseModel):
     source_type: SourceType
     data_path: str | None = None
     prompt_column: str = "prompt"
+    local_csv: LocalCsvDataConfig | None = None
     mock_inline: MockInlineDataConfig | None = None
     mock_generated: MockGeneratedDataConfig | None = None
     mock_jsonl: MockJsonlDataConfig | None = None
@@ -304,9 +311,16 @@ class DataConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source_fields(self) -> "DataConfig":
-        if self.source_type in {SourceType.HDFS_URI, SourceType.HDFS_FUSE_PATH, SourceType.MOCK_JSONL}:
+        if self.source_type in {
+            SourceType.HDFS_URI,
+            SourceType.HDFS_FUSE_PATH,
+            SourceType.LOCAL_CSV,
+            SourceType.MOCK_JSONL,
+        }:
             if not self.data_path:
                 raise ValueError(f"data_path is required when source_type={self.source_type}")
+        if self.source_type == SourceType.LOCAL_CSV and self.local_csv is None:
+            self.local_csv = LocalCsvDataConfig()
         if self.source_type == SourceType.MOCK_INLINE:
             if self.mock_inline is None:
                 self.mock_inline = MockInlineDataConfig()
@@ -329,6 +343,11 @@ class AlgorithmConfig(BaseModel):
 class Fsdp2Config(BaseModel):
     mixed_precision: Literal["bf16", "fp16"]
     sharding: Literal["full_shard", "hybrid_shard"]
+    rendezvous: str | None = None
+    store_endpoint: str | None = None
+    dist_backend: str = "nccl"
+    trust_remote_code: bool = False
+    max_length: int | None = Field(default=None, ge=1)
 
 
 class MockTrainerConfig(BaseModel):
@@ -388,6 +407,17 @@ class VllmRolloutConfig(BaseModel):
     sampling_params: dict[str, Any] = Field(default_factory=dict)
 
 
+class HuggingFaceRolloutConfig(BaseModel):
+    dtype: str | None = None
+    device: str | None = "auto"
+    device_map: str | dict[str, Any] | None = None
+    trust_remote_code: bool = False
+    model_kwargs: dict[str, Any] = Field(default_factory=dict)
+    tokenizer_kwargs: dict[str, Any] = Field(default_factory=dict)
+    generation_kwargs: dict[str, Any] = Field(default_factory=dict)
+    skip_special_tokens: bool = True
+
+
 class MockRolloutConfig(BaseModel):
     response_template: str = "{prompt} :: response@v{policy_version}"
     tokenization: Literal["sha256_bytes", "whitespace_hash"] = "sha256_bytes"
@@ -422,6 +452,7 @@ class MockRolloutConfig(BaseModel):
 class RolloutConfig(BaseModel):
     backend: RolloutBackendName
     vllm: VllmRolloutConfig = Field(default_factory=VllmRolloutConfig)
+    huggingface: HuggingFaceRolloutConfig = Field(default_factory=HuggingFaceRolloutConfig)
     mock: MockRolloutConfig = Field(default_factory=MockRolloutConfig)
     partial_rollout: PartialRolloutConfig = Field(default_factory=PartialRolloutConfig)
     hybrid: RolloutHybridConfig = Field(default_factory=RolloutHybridConfig)
@@ -749,6 +780,9 @@ def _validate_source_uri(field: str, source_type: SourceType, uri: str | None) -
             raise ValueError(f"{field} is required when source_type=hdfs_fuse_path")
         if not uri.startswith("/"):
             raise ValueError(f"{field} must be absolute when source_type=hdfs_fuse_path")
+    elif source_type == SourceType.LOCAL_CSV:
+        if uri is None:
+            raise ValueError(f"{field} is required when source_type=local_csv")
     elif source_type == SourceType.MOCK_JSONL:
         if uri is None:
             raise ValueError(f"{field} is required when source_type=mock_jsonl")

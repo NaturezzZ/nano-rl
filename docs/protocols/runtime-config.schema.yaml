@@ -48,7 +48,7 @@ properties:
         description: When true, write the resolved LaunchConfig JSON to .nano_rl/resolved-config.json and exit without printing it to stdout.
       start_ray_actors:
         type: boolean
-        description: When false, train emits a backend-integrated launch plan without creating Ray actors. When true, RayDriver starts the Ray actor graph and actor wrappers construct vLLM/FSDP2 backend adapters lazily.
+        description: When false, train emits a backend-integrated launch plan without creating Ray actors. When true, RayDriver starts the Ray actor graph and actor wrappers construct rollout/trainer backend adapters lazily.
   runtime:
     type: object
     required: [backend, local, storage, ray]
@@ -72,7 +72,7 @@ properties:
             uniqueItems: true
             items:
               type: string
-              enum: [hdfs_uri, hdfs_fuse_path, mock_inline, mock_generated, mock_jsonl]
+              enum: [hdfs_uri, hdfs_fuse_path, local_csv, mock_inline, mock_generated, mock_jsonl]
           hdfs:
             type: object
             required: [cli]
@@ -221,9 +221,13 @@ properties:
     properties:
       source_type:
         type: string
-        enum: [hdfs_uri, hdfs_fuse_path, mock_inline, mock_generated, mock_jsonl]
+        enum: [hdfs_uri, hdfs_fuse_path, local_csv, mock_inline, mock_generated, mock_jsonl]
       data_path: { type: string, minLength: 1 }
       prompt_column: { type: string, minLength: 1 }
+      local_csv:
+        type: object
+        properties:
+          encoding: { type: string, default: utf-8 }
       mock_inline:
         type: object
         properties:
@@ -314,6 +318,21 @@ properties:
           sharding:
             type: string
             enum: [full_shard, hybrid_shard]
+          rendezvous:
+            type: [string, "null"]
+            description: Optional torch.distributed init_method, such as env://. If omitted, store_endpoint is used.
+          store_endpoint:
+            type: [string, "null"]
+            description: Optional host:port used to build a tcp:// init_method for single-machine FSDP2.
+          dist_backend:
+            type: string
+            default: nccl
+          trust_remote_code:
+            type: boolean
+            default: false
+          max_length:
+            type: [integer, "null"]
+            minimum: 1
       mock:
         type: object
         properties:
@@ -330,7 +349,7 @@ properties:
     properties:
       backend:
         type: string
-        enum: [vllm, mock]
+        enum: [vllm, huggingface, mock]
       vllm:
         type: object
         properties:
@@ -339,6 +358,27 @@ properties:
           trust_remote_code: { type: boolean, default: false }
           engine_kwargs: { type: object }
           sampling_params: { type: object }
+      huggingface:
+        type: object
+        properties:
+          dtype:
+            type: [string, "null"]
+            description: Optional torch dtype name such as auto, bfloat16, float16, or float32.
+          device:
+            type: [string, "null"]
+            default: auto
+            description: Device string for direct Transformers generation. auto picks cuda:0 when CUDA is available, otherwise CPU.
+          device_map:
+            oneOf:
+              - type: string
+              - type: object
+              - type: "null"
+            description: Optional transformers device_map passed to from_pretrained.
+          trust_remote_code: { type: boolean, default: false }
+          model_kwargs: { type: object }
+          tokenizer_kwargs: { type: object }
+          generation_kwargs: { type: object }
+          skip_special_tokens: { type: boolean, default: true }
       mock:
         type: object
         properties:

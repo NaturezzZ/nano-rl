@@ -8,3 +8,6 @@ __pycache__/
 .rsyncignore
 *.log
 .pytest_cache/
+huggingface
+.venv-nano-rl/
+.nano-rl-local

@@ -1,9 +1,8 @@
-# Local 8-GPU real-backend training recipe wired to the checked-in asset dirs.
+# Local real-backend training recipe wired to the checked-in asset dirs.
 #
-# Rollout uses vLLM with tensor_parallel_size=2. The FSDP2 trainer and rollout
-# backend both load from a Transformers-compatible checkpoint directory. The
-# eight shared GPUs resolve to four rollout replicas, each owning one 2-GPU TP
-# group, and eight trainer ranks during the train window.
+# Rollout uses the direct Hugging Face Transformers backend instead of vLLM or
+# mock. The FSDP2 trainer and rollout backend both load from a
+# Transformers-compatible checkpoint directory.
 run:
   intent: train
   emit_resolved_config: false
@@ -12,8 +11,8 @@ run:
 runtime:
   backend: ray
   local:
-    num_gpus: 8
-    cpus: 64
+    num_gpus: 1
+    cpus: 8
   storage:
     allowed_input_sources: [local_csv]
   ray:
@@ -30,7 +29,7 @@ runtime:
         trainer_rank: nano_rl.runtime.roles.TrainerRankRole
       topology:
         rollout_only_gpus: 0
-        shared_gpus: 8
+        shared_gpus: 1
         idle_gpus: 0
       hybrid_toggle:
         strategy: swap_on_toggle
@@ -40,31 +39,30 @@ runtime:
         offload:
           trainer_model: cpu
           trainer_optimizer: cpu
-          rollout_engine: vllm_sleep
-          vllm_sleep_level: 2
-          cpu_memory_budget_gb: 64
-          residual_gpu_memory_budget_mb: 2048
+          rollout_engine: teardown_and_reload
+          cpu_memory_budget_gb: 1
+          residual_gpu_memory_budget_mb: 0
     placement:
       trainer:
-        num_ranks: 8
+        num_ranks: 1
         gpus_per_rank: 1
-        cpus_per_rank: 4
+        cpus_per_rank: 0
       rollout:
-        num_replicas: 4
-        gpus_per_replica: 2
-        tensor_parallel_size: 2
+        num_replicas: 1
+        gpus_per_replica: 1
+        tensor_parallel_size: 1
 
 mode: collocated
 
 parallel:
   trainer:
-    data_parallel_size: 8
-    fsdp_world_size: 8
+    data_parallel_size: 1
+    fsdp_world_size: 1
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
   rollout:
-    data_parallel_size: 4
-    tensor_parallel_size: 2
+    data_parallel_size: 1
+    tensor_parallel_size: 1
 
 model:
   model_path: ./huggingface/models/qwen3-0.6b-hf
@@ -85,7 +83,7 @@ algorithm:
 
 trainer:
   backend: fsdp2
-  global_batch_size: 8
+  global_batch_size: 4
   checkpoint_dir: ./.nano-rl-local/qwen3-awesome-prompts/fsdp-checkpoints
   fsdp2:
     mixed_precision: bf16
@@ -97,16 +95,20 @@ trainer:
     max_length: 2048
 
 rollout:
-  backend: vllm
-  vllm:
+  backend: huggingface
+  huggingface:
     dtype: bfloat16
+    device: auto
+    device_map: null
     trust_remote_code: true
-    max_model_len: 2048
-    engine_kwargs: {}
-    sampling_params:
+    model_kwargs: {}
+    tokenizer_kwargs: {}
+    generation_kwargs:
+      do_sample: true
       temperature: 0.8
       top_p: 0.95
-      max_tokens: 256
+      max_new_tokens: 256
+    skip_special_tokens: true
   partial_rollout:
     enabled: false
     pause_mode: keep
@@ -137,4 +139,4 @@ control:
   sample_ttl_sec: 60
   queue_high_watermark: 64
   max_pending_rollout_refs: 8
-  max_pending_train_refs: 8
+  max_pending_train_refs: 4

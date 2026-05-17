@@ -135,6 +135,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "vllm_sleep_level": (
                             config.runtime.ray.gpu_manager.hybrid_toggle.offload.vllm_sleep_level or 2
                         ),
+                        "huggingface": config.rollout.huggingface.model_dump(mode="json"),
                         "mock": config.rollout.mock.model_dump(mode="json"),
                     },
                     config.reward.model_dump(mode="json"),
@@ -191,6 +192,8 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "gpu_id": rank.gpu_id,
                         "holder_id": f"trainer-rank-{rank.rank}",
                         "group_epoch": 0,
+                        "rendezvous": config.trainer.fsdp2.rendezvous if config.trainer.fsdp2 else None,
+                        "store_endpoint": config.trainer.fsdp2.store_endpoint if config.trainer.fsdp2 else None,
                         "model_path": config.model.model_path,
                         "checkpoint_dir": config.trainer.checkpoint_dir,
                         "extra": _trainer_backend_extra(config),
@@ -236,8 +239,12 @@ def _trainer_backend_extra(config: LaunchConfig) -> dict[str, Any]:
             {
                 "mixed_precision": config.trainer.fsdp2.mixed_precision,
                 "sharding": config.trainer.fsdp2.sharding,
+                "dist_backend": config.trainer.fsdp2.dist_backend,
+                "trust_remote_code": config.trainer.fsdp2.trust_remote_code,
             }
         )
+        if config.trainer.fsdp2.max_length is not None:
+            extra["max_length"] = config.trainer.fsdp2.max_length
     elif config.trainer.backend == TrainerBackendName.MOCK:
         extra["mock"] = config.trainer.mock.model_dump(mode="json")
         if str(config.weight_transfer.store.backend) != "checkpoint":

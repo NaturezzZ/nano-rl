@@ -50,6 +50,28 @@ def test_disaggregated_example_resolves_rollout_only_and_shared_gpu_plan() -> No
     assert config.weight_transfer.allow_rollout_only_artifact_pull is True
 
 
+def test_collocated_qwen3_recipe_uses_huggingface_rollout_and_checked_in_assets() -> None:
+    config = load_launch_config(ROOT / "recipes/collocated_qwen3.yaml")
+
+    assert config.canonical_mode == CanonicalMode.FULLY_SYNC
+    assert config.run.start_ray_actors is True
+    assert config.trainer.backend == "fsdp2"
+    assert config.rollout.backend == "huggingface"
+    assert config.rollout.huggingface.generation_kwargs["max_new_tokens"] == 256
+    assert config.model.model_path == "./huggingface/models/qwen3-0.6b-hf"
+    assert config.data.source_type == "local_csv"
+    assert config.data.data_path == "./huggingface/data/awesome-chatgpt-prompts/prompts.csv"
+    assert config.data.prompt_column == "prompt"
+    assert config.runtime.storage.allowed_input_sources == ["local_csv"]
+    assert config.gpu_plan.shared_gpu_ids == (0,)
+    assert config.trainer.checkpoint_dir == "./.nano-rl-local/qwen3-awesome-prompts/fsdp-checkpoints"
+    assert config.trainer.fsdp2 is not None
+    assert config.trainer.fsdp2.store_endpoint == "127.0.0.1:29500"
+    assert config.trainer.fsdp2.dist_backend == "nccl"
+    assert config.trainer.fsdp2.trust_remote_code is True
+    assert config.trainer.fsdp2.max_length == 2048
+
+
 def test_model_path_does_not_require_storage_source_type() -> None:
     raw = _load_yaml("recipes/collocated.yaml")
     raw = copy.deepcopy(raw)

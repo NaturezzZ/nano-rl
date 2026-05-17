@@ -382,10 +382,13 @@ def build_rollout_backend(
     config: VllmBackendConfig | Mapping[str, Any] | None = None,
     *,
     engine_factory: EngineFactory | None = None,
+    hf_model_factory: Any | None = None,
+    hf_tokenizer_factory: Any | None = None,
 ) -> RolloutBackend:
     """Factory hook for future Ray role actors."""
 
-    if _backend_name(config) == "mock":
+    backend_name = _backend_name(config)
+    if backend_name == "mock":
         from nano_rl.runtime.backends.mock_rollout_backend import MockRolloutBackend, MockRolloutBackendConfig
 
         resolved = (
@@ -394,6 +397,22 @@ def build_rollout_backend(
             else MockRolloutBackendConfig.from_rollout_backend_config(config if isinstance(config, Mapping) else {})
         )
         return MockRolloutBackend(resolved)
+    if backend_name == "huggingface":
+        from nano_rl.runtime.backends.huggingface_backend import (
+            HuggingFaceBackendConfig,
+            HuggingFaceRolloutBackend,
+        )
+
+        resolved = (
+            config
+            if isinstance(config, HuggingFaceBackendConfig)
+            else HuggingFaceBackendConfig.from_rollout_backend_config(config if isinstance(config, Mapping) else {})
+        )
+        return HuggingFaceRolloutBackend(
+            resolved,
+            model_factory=hf_model_factory,
+            tokenizer_factory=hf_tokenizer_factory,
+        )
 
     resolved = config if isinstance(config, VllmBackendConfig) else VllmBackendConfig.model_validate(config or {})
     return VllmRolloutBackend(resolved, engine_factory=engine_factory)
@@ -404,6 +423,8 @@ def _backend_name(config: VllmBackendConfig | Mapping[str, Any] | None) -> str:
         return str(config.get("backend", "vllm"))
     if config is not None and type(config).__name__ == "MockRolloutBackendConfig":
         return "mock"
+    if config is not None and type(config).__name__ == "HuggingFaceBackendConfig":
+        return "huggingface"
     return "vllm"
 
 

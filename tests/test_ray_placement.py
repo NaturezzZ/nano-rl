@@ -77,6 +77,29 @@ def test_ray_launch_plan_uses_role_scoped_gpu_resources() -> None:
     assert trainer_backend_config["world_size"] == 4
     assert trainer_backend_config["gpu_id"] == 4
     assert trainer_backend_config["holder_id"] == "trainer-rank-0"
+    assert trainer_backend_config["rendezvous"] is None
+    assert trainer_backend_config["store_endpoint"] is None
+
+
+def test_local_huggingface_launch_plan_passes_backend_and_fsdp2_rendezvous() -> None:
+    config = load_launch_config(ROOT / "recipes/collocated_qwen3.yaml")
+    plan = build_ray_launch_plan(config)
+
+    rollout_replica = next(actor for actor in plan.actors if actor.name == "rollout-dp-0")
+    rollout_backend_config = rollout_replica.init_args[3]
+    assert rollout_backend_config["backend"] == "huggingface"
+    assert rollout_backend_config["huggingface"]["dtype"] == "bfloat16"
+    assert rollout_backend_config["huggingface"]["generation_kwargs"]["max_new_tokens"] == 256
+
+    trainer_rank = next(actor for actor in plan.actors if actor.name == "trainer-rank-0")
+    trainer_backend_config = trainer_rank.init_args[3]
+
+    assert trainer_backend_config["backend"] == "fsdp2"
+    assert trainer_backend_config["store_endpoint"] == "127.0.0.1:29500"
+    assert trainer_backend_config["rendezvous"] is None
+    assert trainer_backend_config["extra"]["dist_backend"] == "nccl"
+    assert trainer_backend_config["extra"]["trust_remote_code"] is True
+    assert trainer_backend_config["extra"]["max_length"] == 2048
 
 
 def test_ray_driver_dry_run_includes_launch_plan() -> None:

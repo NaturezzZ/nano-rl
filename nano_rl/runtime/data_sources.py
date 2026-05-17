@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import random
+import sys
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -15,8 +17,9 @@ from typing import Any, Protocol
 MOCK_INLINE = "mock_inline"
 MOCK_GENERATED = "mock_generated"
 MOCK_JSONL = "mock_jsonl"
+LOCAL_CSV = "local_csv"
 MOCK_PROFILE = "mock_profile"
-SUPPORTED_MOCK_SOURCES = (MOCK_INLINE, MOCK_GENERATED, MOCK_JSONL)
+SUPPORTED_PROMPT_SOURCES = (MOCK_INLINE, MOCK_GENERATED, MOCK_JSONL, LOCAL_CSV)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +198,32 @@ class MockJsonlPromptSource:
         yield from _limit_records(self._records, limit)
 
 
+class LocalCsvPromptSource:
+    """Prompt source backed by a local CSV file."""
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        *,
+        prompt_column: str = "prompt",
+        encoding: str = "utf-8",
+        profile: MockDataProfile | None = None,
+    ) -> None:
+        if not prompt_column:
+            raise ValueError("local_csv.prompt_column must be non-empty")
+        path = Path(data_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"local_csv.data_path does not exist or is not a file: {path}")
+        self._profile = profile or MockDataProfile()
+        self._records = tuple(
+            _apply_mock_data_profile(record, source_type=LOCAL_CSV, profile=self._profile)
+            for record in _read_csv_records(path, prompt_column=prompt_column, encoding=encoding)
+        )
+
+    def iter_prompts(self, *, limit: int | None = None) -> Iterator[PromptRecord]:
+        yield from _limit_records(self._records, limit)
+
+
 def build_prompt_source(config: Any, *, seed: int | None = None) -> PromptSource:
     """Build a prompt source from LaunchConfig, DataConfig, or a data dict."""
 
@@ -239,8 +268,19 @@ def build_prompt_source(config: Any, *, seed: int | None = None) -> PromptSource
             profile=profile,
         )
 
-    supported = ", ".join(SUPPORTED_MOCK_SOURCES)
-    raise ValueError(f"Unsupported prompt source '{source_type}'. Supported mock sources: {supported}")
+    if source_type == LOCAL_CSV:
+        data_path = options.get("data_path") or options.get("path")
+        if not data_path:
+            raise ValueError("local_csv.data_path is required")
+        return LocalCsvPromptSource(
+            data_path,
+            prompt_column=str(options.get("prompt_column", "prompt")),
+            encoding=str(options.get("encoding", "utf-8")),
+            profile=profile,
+        )
+
+    supported = ", ".join(SUPPORTED_PROMPT_SOURCES)
+    raise ValueError(f"Unsupported prompt source '{source_type}'. Supported prompt sources: {supported}")
 
 
 def _coerce_data_mapping(config: Any) -> dict[str, Any]:
@@ -298,7 +338,7 @@ def _source_options(data: Mapping[str, Any], source_type: str) -> dict[str, Any]
             raise TypeError(f"{source_type} options must be a mapping")
         options.update(nested)
 
-    nested_keys = set(SUPPORTED_MOCK_SOURCES) | {MOCK_PROFILE}
+    nested_keys = set(SUPPORTED_PROMPT_SOURCES) | {MOCK_PROFILE}
     for key, value in data.items():
         if key == "source_type" or key in nested_keys:
             continue
@@ -366,6 +406,41 @@ def _read_jsonl_records(path: Path, *, prompt_column: str) -> Iterator[PromptRec
 
             prompt_id = row.get("prompt_id", row.get("id", f"{MOCK_JSONL}:{line_number}"))
             yield PromptRecord(prompt_id=str(prompt_id), prompt=prompt, metadata=metadata)
+
+
+def _read_csv_records(path: Path, *, prompt_column: str, encoding: str) -> Iterator[PromptRecord]:
+    _raise_csv_field_size_limit()
+    with path.open("r", encoding=encoding, newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError("local_csv file must include a header row")
+        if prompt_column not in reader.fieldnames:
+            raise ValueError(f"local_csv header is missing prompt_column '{prompt_column}'")
+
+        for row_number, row in enumerate(reader, start=1):
+            prompt = row.get(prompt_column)
+            if prompt is None:
+                raise ValueError(f"local_csv row {row_number} is missing prompt_column '{prompt_column}'")
+            if not isinstance(prompt, str):
+                raise TypeError(f"local_csv row {row_number} column '{prompt_column}' must be a string")
+
+            metadata = {
+                key: value
+                for key, value in row.items()
+                if key not in {prompt_column, "prompt_id", "id"} and key is not None
+            }
+            prompt_id = row.get("prompt_id") or row.get("id") or f"{LOCAL_CSV}:{row_number}"
+            yield PromptRecord(prompt_id=str(prompt_id), prompt=prompt, metadata=metadata)
+
+
+def _raise_csv_field_size_limit() -> None:
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit = limit // 10
 
 
 def _limit_records(records: Iterable[PromptRecord], limit: int | None) -> Iterator[PromptRecord]:
