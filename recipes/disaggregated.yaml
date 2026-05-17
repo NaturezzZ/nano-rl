@@ -99,6 +99,9 @@ trainer:
 
 rollout:
   backend: vllm
+  vllm:
+    engine_kwargs:
+      enable_sleep_mode: true
   partial_rollout:
     enabled: true
     pause_mode: keep

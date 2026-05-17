@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
+import pytest
+
 from nano_rl.config import load_launch_config
 from nano_rl.runtime.protocols import WeightFormat, WeightMeta
 from nano_rl.runtime.ray.training import RayTrainingLoop
@@ -85,11 +87,12 @@ def test_ray_training_loop_offloads_and_wakes_shared_gpu_residency_before_weight
 
     for rank in config.gpu_plan.trainer_ranks:
         handles[f"trainer-rank-{rank.rank}"] = FakeActor(
+            initialize_rank=lambda rank=rank.rank: operations.append(f"trainer.initialize:{rank}") or {"rank": rank},
             hydrate=lambda state, lease, rank=rank.rank: operations.append(f"trainer.hydrate:{rank}") or state,
             optimize=lambda batch, lease, rank=rank.rank: operations.append(f"trainer.optimize:{rank}") or {},
             offload=lambda lease, rank=rank.rank: operations.append(f"trainer.offload:{rank}") or {},
-            export_weight=lambda parent, rank=rank.rank: (
-                operations.append(f"trainer.export:{rank}:v{parent['version_id']}")
+            export_weight=lambda parent, publish=True, rank=rank.rank: (
+                operations.append(f"trainer.export:{rank}:publish={publish}:v{parent['version_id']}")
                 or exported
             ),
         )
@@ -99,7 +102,6 @@ def test_ray_training_loop_offloads_and_wakes_shared_gpu_residency_before_weight
         SimpleNamespace(handles=handles),
         ray_module=FakeRay(),
     )
-    loop._trainer_states = {rank.rank: {"rank": rank.rank} for rank in config.gpu_plan.trainer_ranks}
 
     result = loop._run_train_step(
         {"train_batch_id": "batch-1"},
@@ -108,12 +110,85 @@ def test_ray_training_loop_offloads_and_wakes_shared_gpu_residency_before_weight
     )
 
     assert result["active_weight"]["version_id"] == 1
-    assert call_index("rollout.offload:") < call_index("trainer.hydrate:")
+    assert call_index("rollout.offload:") < call_index("trainer.initialize:")
+    assert call_index("trainer.initialize:") < call_index("trainer.hydrate:")
     assert call_index("trainer.offload:") < call_index("rollout.wake:")
     assert call_index("rollout.wake:") < call_index("rollout.activate:")
     assert call_index("registry.register:v1") < call_index("rollout.activate:")
     assert call_index("trainer.offload:") < call_index("queue.ack:batch-1")
+    assert [
+        item
+        for item in operations
+        if item.startswith("trainer.export:")
+    ] == [
+        f"trainer.export:{rank.rank}:publish={rank.rank == 0}:v0"
+        for rank in config.gpu_plan.trainer_ranks
+    ]
     assert not any(item.startswith("queue.release") for item in operations)
+
+
+def test_ray_training_loop_preserves_optimize_error_when_best_effort_offload_fails() -> None:
+    config = load_launch_config(ROOT / "recipes/mock_collocated.yaml")
+    leases = GpuLeaseManagerCore(config.gpu_plan)
+    operations: list[str] = []
+
+    def fail_optimize(_batch: dict[str, object], _lease: dict[str, object]) -> None:
+        operations.append("trainer.optimize.failed")
+        raise RuntimeError("primary optimize failed")
+
+    def fail_offload(_lease: dict[str, object]) -> None:
+        operations.append("trainer.offload.failed")
+        raise RuntimeError("cleanup offload failed")
+
+    handles: dict[str, Any] = {
+        "gpu-lease-manager": FakeActor(
+            grant=lambda role, gpu_id, holder_id, reason: leases.grant(
+                RoleName(role),
+                gpu_id,
+                holder_id,
+                reason=reason,
+            ).model_dump(mode="json"),
+            current_lease=lambda role, gpu_id, holder_id: leases.current_lease(
+                RoleName(role),
+                gpu_id,
+                holder_id=holder_id,
+            ).model_dump(mode="json"),
+        ),
+        "sample-queue": FakeActor(
+            ack_batch=lambda train_batch_id: operations.append(f"queue.ack:{train_batch_id}"),
+            release_batch=lambda train_batch_id: operations.append(f"queue.release:{train_batch_id}"),
+        ),
+    }
+    for replica in config.gpu_plan.rollout_replicas:
+        handles[replica.replica_id] = FakeActor(
+            offload=lambda leases, replica_id=replica.replica_id: operations.append(f"rollout.offload:{replica_id}"),
+            wake=lambda leases, replica_id=replica.replica_id: operations.append(f"rollout.wake:{replica_id}"),
+        )
+    for rank in config.gpu_plan.trainer_ranks:
+        handles[f"trainer-rank-{rank.rank}"] = FakeActor(
+            initialize_rank=lambda rank=rank.rank: operations.append(f"trainer.initialize:{rank}") or {"rank": rank},
+            hydrate=lambda state, lease, rank=rank.rank: operations.append(f"trainer.hydrate:{rank}") or state,
+            optimize=fail_optimize,
+            offload=fail_offload,
+        )
+
+    loop = RayTrainingLoop(
+        config,
+        SimpleNamespace(handles=handles),
+        ray_module=FakeRay(),
+    )
+
+    with pytest.raises(RuntimeError, match="primary optimize failed"):
+        loop._run_train_step(
+            {"train_batch_id": "batch-1"},
+            current_weight=_weight(version_id=0).model_dump(mode="json"),
+            controller_step=0,
+        )
+
+    assert "trainer.offload.failed" in operations
+    assert "queue.release:batch-1" in operations
+    assert not any(item.startswith("queue.ack") for item in operations)
+    assert any(item.startswith("rollout.wake:") for item in operations)
 
 
 def _weight(version_id: int) -> WeightMeta:

@@ -144,7 +144,7 @@ class RayClusterController:
         self._ray_init(
             ray,
             self._init_kwargs(
-                address=None,
+                address="local",
                 resources=dict(self.node_custom_resources),
                 num_cpus=self.node_num_cpus,
             )

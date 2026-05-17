@@ -149,14 +149,14 @@ Canonical documents:
 
 ## Python Environment
 
-- In this repository, use `/Users/bytedance/.venv/bin/python3` as the Python
-  interpreter for Python commands, tests, scripts, and validation.
-- Prefer commands such as `/Users/bytedance/.venv/bin/python3 -m pytest ...`
-  and `/Users/bytedance/.venv/bin/python3 main.py ...` rather than relying on
-  the system Python.
+- In this repository, use `.venv-nano-rl/bin/python3` as the Python interpreter
+  for Python commands, tests, scripts, and validation.
+- Prefer commands such as `.venv-nano-rl/bin/python3 -m pytest ...` and
+  `.venv-nano-rl/bin/python3 main.py ...` rather than relying on the system
+  Python.
 - If an interactive shell already resolves `python3` to
-  `/Users/bytedance/.venv/bin/python3`, using `python3` is acceptable after
-  confirming it with `which python3`.
+  `.venv-nano-rl/bin/python3`, using `python3` is acceptable after confirming it
+  with `which python3`.
 
 ## Validation Expectations
 

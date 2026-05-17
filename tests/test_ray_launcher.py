@@ -232,6 +232,7 @@ def test_ray_cluster_controller_auto_falls_back_to_local_cluster(caplog: pytest.
         {"namespace": "nano-rl", "address": "auto", "logging_level": "warning"},
         {
             "namespace": "nano-rl",
+            "address": "local",
             "resources": {"rollout_gpu_0": 1, "train_gpu_0": 1},
             "logging_level": "warning",
         },

@@ -7,9 +7,11 @@ import os
 
 import pytest
 
+import nano_rl.runtime.backends.vllm_backend as vllm_backend_module
 from nano_rl.runtime.backends import (
     GenerationOutput,
     VllmBackendConfig,
+    VllmBackendError,
     VllmBackendUnavailable,
     build_rollout_backend,
     generation_output_to_sample_record,
@@ -77,6 +79,11 @@ class FakeVllmEngine:
                 request_id=f"engine-{prompt}",
             )
         ]
+
+
+class FakeVllmEngineWithoutSleep(FakeVllmEngine):
+    sleep = None
+    offload = None
 
 
 def test_importing_backend_does_not_import_vllm() -> None:
@@ -183,6 +190,90 @@ def test_backend_offloads_and_wakes_vllm_engine_before_generate() -> None:
     assert engines[0].sleep_calls == [2]
     assert engines[0].wake_calls == 1
     assert output.response == "ready -> fake"
+
+
+def test_vllm_sleep_forces_sleep_mode_engine_kwarg() -> None:
+    engines: list[FakeVllmEngine] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeVllmEngine:
+        engine = FakeVllmEngine(config, meta)
+        engines.append(engine)
+        return engine
+
+    backend = build_rollout_backend(
+        {
+            "gpu_ids": (0,),
+            "holder_id": "worker-0",
+            "engine_kwargs": {"enable_sleep_mode": False},
+        },
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+
+    backend.activate_weight(_weight(version_id=9), lease=lease)
+
+    assert engines[0].config.engine_kwargs["enable_sleep_mode"] is True
+
+
+def test_vllm_sleep_does_not_teardown_when_sleep_api_is_missing() -> None:
+    engines: list[FakeVllmEngineWithoutSleep] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeVllmEngineWithoutSleep:
+        engine = FakeVllmEngineWithoutSleep(config, meta)
+        engines.append(engine)
+        return engine
+
+    backend = build_rollout_backend(
+        {"gpu_ids": (0,), "holder_id": "worker-0"},
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+    backend.activate_weight(_weight(version_id=10), lease=lease)
+
+    with pytest.raises(VllmBackendError, match="cannot keep engine resident"):
+        backend.offload(lease=lease)
+
+    assert backend.engine is engines[0]
+
+
+def test_vllm_sleep_enforces_residual_gpu_memory_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    engines: list[FakeVllmEngine] = []
+
+    def factory(config: VllmBackendConfig, meta: WeightMeta) -> FakeVllmEngine:
+        engine = FakeVllmEngine(config, meta)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(
+        vllm_backend_module,
+        "_visible_gpu_memory_snapshot_mb",
+        lambda _config: (
+            {
+                "local_device": 0,
+                "gpu_id": 0,
+                "used_mb": 4096,
+                "free_mb": 1024,
+                "total_mb": 5120,
+            },
+        ),
+    )
+    backend = build_rollout_backend(
+        {
+            "gpu_ids": (0,),
+            "holder_id": "worker-0",
+            "residual_gpu_memory_budget_mb": 2048,
+        },
+        engine_factory=factory,
+    )
+    lease = GpuLease(gpu_id=0, role=RoleName.ROLLOUT, holder_id="worker-0", lease_epoch=1)
+    backend.activate_weight(_weight(version_id=11), lease=lease)
+
+    with pytest.raises(VllmBackendError, match="residual GPU memory above budget"):
+        backend.offload(lease=lease)
+
+    assert engines[0].sleep_calls == [2]
+    with pytest.raises(Exception, match="offloaded"):
+        backend.generate(prompt="blocked", target_policy_version=11, request_metadata={}, lease=lease)
 
 
 def test_fake_engine_output_converts_to_sample_record() -> None:

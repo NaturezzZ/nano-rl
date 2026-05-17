@@ -163,26 +163,52 @@ class Fsdp2TrainerBackend(TrainerBackend):
         )
         return result
 
-    def export_weight(self, parent: WeightMeta) -> WeightMeta:
+    def export_weight(self, parent: WeightMeta, *, publish: bool = True) -> WeightMeta:
         logger.info(
-            "FSDP2 export_weight started: rank=%s parent_version=%s checkpoint_dir=%s",
+            "FSDP2 export_weight started: rank=%s parent_version=%s checkpoint_dir=%s publish=%s",
             self.config.rank,
             parent.version_id,
             self.config.checkpoint_dir,
+            publish,
         )
-        if self.config.rank != 0:
+        if publish and self.config.rank != 0:
             raise BackendStateError(f"trainer rank {self.config.rank} cannot export weights; rank 0 owns publish")
         self._require_fsdp2()
         model = self._require_model()
-        tokenizer = self._require_tokenizer()
         version_id = parent.version_id + 1
         output_dir = checkpoint_version_dir(self.config, version_id)
+        export_state_dict = self._full_model_state_dict_for_export(model)
+
+        self._weight_version = version_id
+        if not publish:
+            participant = WeightMeta(
+                version_id=version_id,
+                parent_version=parent.version_id,
+                trainer_step=self._train_step,
+                created_at=datetime.utcnow(),
+                model_path=str(output_dir),
+                tokenizer_path=str(output_dir),
+                artifact_uri=str(output_dir),
+                format=WeightFormat.VLLM_COMPATIBLE,
+                checksum=parent.checksum,
+                created_by=f"trainer-rank-{self.config.rank}",
+            )
+            logger.info(
+                "FSDP2 export_weight participated: rank=%s version=%s",
+                self.config.rank,
+                participant.version_id,
+            )
+            return participant
+
+        tokenizer = self._require_tokenizer()
         output_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(output_dir)
+        if export_state_dict is None:
+            model.save_pretrained(output_dir)
+        else:
+            model.save_pretrained(output_dir, state_dict=export_state_dict)
         if hasattr(tokenizer, "save_pretrained"):
             tokenizer.save_pretrained(output_dir)
         checksum = _hash_checkpoint_dir(output_dir)
-        self._weight_version = version_id
         exported = WeightMeta(
             version_id=version_id,
             parent_version=parent.version_id,
@@ -203,6 +229,38 @@ class Fsdp2TrainerBackend(TrainerBackend):
             exported.checksum,
         )
         return exported
+
+    def _full_model_state_dict_for_export(self, model: Any) -> dict[str, Any] | None:
+        if self.config.world_size <= 1:
+            return None
+
+        try:
+            state_dict_module = import_module("torch.distributed.checkpoint.state_dict")
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise BackendUnavailableError(
+                "FSDP2 full-model export requires torch.distributed.checkpoint.state_dict"
+            ) from exc
+
+        get_model_state_dict = getattr(state_dict_module, "get_model_state_dict", None)
+        state_dict_options = getattr(state_dict_module, "StateDictOptions", None)
+        if get_model_state_dict is None or state_dict_options is None:
+            raise BackendUnavailableError(
+                "FSDP2 full-model export requires get_model_state_dict and StateDictOptions"
+            )
+
+        logger.info("FSDP2 full state_dict materialization started: rank=%s", self.config.rank)
+        options = state_dict_options(full_state_dict=True, cpu_offload=True)
+        raw_state_dict = get_model_state_dict(model, options=options)
+        materialized = {
+            name: _materialize_export_state_value(value)
+            for name, value in raw_state_dict.items()
+        }
+        logger.info(
+            "FSDP2 full state_dict materialization completed: rank=%s tensor_count=%s",
+            self.config.rank,
+            len(materialized),
+        )
+        return materialized
 
     def offload(self, *, lease: GpuLease) -> TrainStateBundle:
         logger.info(
@@ -464,6 +522,16 @@ def _move_nested_value_to_device(value: Any, device: Any) -> Any:
         return value
     if isinstance(value, tuple):
         return tuple(_move_nested_value_to_device(item, device) for item in value)
+    return value
+
+
+def _materialize_export_state_value(value: Any) -> Any:
+    if hasattr(value, "full_tensor"):
+        value = value.full_tensor()
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
     return value
 
 

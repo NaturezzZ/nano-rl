@@ -52,6 +52,7 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
 
     placement = config.runtime.ray.placement
     role_classes = config.runtime.ray.gpu_manager.role_classes
+    toggle_offload = config.runtime.ray.gpu_manager.hybrid_toggle.offload
     mock_actor_memory_bytes = _mock_actor_memory_bytes(config)
 
     node_custom_resources: dict[str, float] = {}
@@ -127,14 +128,13 @@ def build_ray_launch_plan(config: LaunchConfig) -> RayLaunchPlan:
                         "dtype": config.rollout.vllm.dtype,
                         "max_model_len": config.rollout.vllm.max_model_len,
                         "trust_remote_code": config.rollout.vllm.trust_remote_code,
-                        "engine_kwargs": config.rollout.vllm.engine_kwargs,
+                        "engine_kwargs": _vllm_engine_kwargs(config),
                         "sampling_params": config.rollout.vllm.sampling_params,
                         "gpu_ids": list(replica.gpu_ids),
                         "holder_ids": list(replica.worker_ids),
-                        "offload_strategy": config.runtime.ray.gpu_manager.hybrid_toggle.offload.rollout_engine,
-                        "vllm_sleep_level": (
-                            config.runtime.ray.gpu_manager.hybrid_toggle.offload.vllm_sleep_level or 2
-                        ),
+                        "offload_strategy": toggle_offload.rollout_engine,
+                        "vllm_sleep_level": toggle_offload.vllm_sleep_level or 2,
+                        "residual_gpu_memory_budget_mb": toggle_offload.residual_gpu_memory_budget_mb,
                         "huggingface": config.rollout.huggingface.model_dump(mode="json"),
                         "mock": config.rollout.mock.model_dump(mode="json"),
                     },
@@ -250,6 +250,13 @@ def _trainer_backend_extra(config: LaunchConfig) -> dict[str, Any]:
         if str(config.weight_transfer.store.backend) != "checkpoint":
             extra["weight_store"] = config.weight_transfer.store.model_dump(mode="json")
     return extra
+
+
+def _vllm_engine_kwargs(config: LaunchConfig) -> dict[str, Any]:
+    engine_kwargs = dict(config.rollout.vllm.engine_kwargs)
+    if config.runtime.ray.gpu_manager.hybrid_toggle.offload.rollout_engine == "vllm_sleep":
+        engine_kwargs["enable_sleep_mode"] = True
+    return engine_kwargs
 
 
 def _validate_role_resource_uniqueness(actors: list[RayActorSpec]) -> None:

@@ -156,7 +156,7 @@ class TrainerBackend(ABC):
         """Run one optimizer update under a valid trainer GPU lease."""
 
     @abstractmethod
-    def export_weight(self, parent: WeightMeta) -> WeightMeta:
+    def export_weight(self, parent: WeightMeta, *, publish: bool = True) -> WeightMeta:
         """Export a backend-readable weight artifact; only rank 0 may publish."""
 
     @abstractmethod
@@ -232,10 +232,27 @@ class MockTrainerBackend(TrainerBackend):
             metrics={"mock_loss": loss, "fake_loss": loss},
         )
 
-    def export_weight(self, parent: WeightMeta) -> WeightMeta:
-        if self.options.require_rank0_export and self.config.rank != 0:
+    def export_weight(self, parent: WeightMeta, *, publish: bool = True) -> WeightMeta:
+        if publish and self.options.require_rank0_export and self.config.rank != 0:
             raise BackendStateError(f"trainer rank {self.config.rank} cannot export weights; rank 0 owns publish")
         version_id = parent.version_id + 1
+        checksum = sha256(f"{parent.checksum}:{version_id}:{self._train_step}".encode()).hexdigest()
+        self._weight_version = version_id
+        if not publish:
+            return WeightMeta(
+                version_id=version_id,
+                parent_version=parent.version_id,
+                trainer_step=self._train_step,
+                created_at=datetime.utcnow(),
+                model_path=parent.model_path,
+                tokenizer_path=parent.tokenizer_path,
+                artifact_uri=parent.artifact_uri,
+                manifest_uri=parent.manifest_uri,
+                format=self.options.export_format,
+                checksum=checksum,
+                created_by=f"trainer-rank-{self.config.rank}",
+            )
+
         payload = build_mock_weight_payload(
             version_id=version_id,
             parent_version=parent.version_id,
@@ -259,8 +276,6 @@ class MockTrainerBackend(TrainerBackend):
             self._weight_version = exported.version_id
             return exported
 
-        checksum = sha256(f"{parent.checksum}:{version_id}:{self._train_step}".encode()).hexdigest()
-        self._weight_version = version_id
         return WeightMeta(
             version_id=version_id,
             parent_version=parent.version_id,

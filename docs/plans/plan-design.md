@@ -778,6 +778,8 @@ trainer 到 rollout 的路径：
 - `objectref`：trainer/exporter 把 rollout 可消费的权重对象或 shard refs 放进 Ray object store，`WeightTransferPlan.sources[*].kind=ray_object_ref`。这个路径实现简单，适合小模型测试、fake backend 或调试，但对真实大模型过重：object store 会复制/序列化大张量，跨 replica fan-out 容易挤压 sample refs。
 - `locality_aware_checkpoint`：默认生产向路径。shared GPU 上的 rollout replica 在训练窗口之后会回到同一批物理 GPU，这些 GPU 已经持有 FSDP2 更新后的 rank-local 权重或 CPU standby state；对应 `WeightShardSource.kind=shared_gpu_reshard`，activation 只需要在 lease 切回 rollout 后把本地 trainer shard reshard 成 vLLM TP layout。rollout-only GPU 没有 trainer-resident 权重，对应 `WeightShardSource.kind=artifact_pull`，从 `artifact_uri` / `manifest_uri` 拉取需要的 vLLM shard。
 
+TODO: 接入 vLLM 原生 Weight Transfer API，让 trainer 和 rollout/vLLM worker 直接完成权重数据面传输和更新，而不是把 checkpoint reload 作为主路径。目标是把 `locality_aware_checkpoint` 的 shared-GPU 分支映射到 vLLM IPC/CUDA IPC 路径，把 trainer/rollout 分卡或 rollout-only 分支映射到 vLLM NCCL broadcast 路径；控制面仍由 `WeightRegistryActor`、`WeightTransferPlanner`、rollout pause/resume 和 activation ack 管理版本一致性，checkpoint artifact 只保留为 fallback、恢复和审计路径。
+
 这解决了 hybrid 场景里的非对称性：shared GPU 不做全量远程传输，只做本地格式转换/reshard；rollout-only GPU 通过版本 artifact hydrate。一个 rollout TP group 不允许横跨 rollout-only/shared 生命周期区域，因此 planner 不需要处理半个 TP group 本地、半个 TP group 远程的模糊状态。
 
 `WeightTransferPlan` 是 per-version/per-replica 的控制面对象，不承载大 tensor：
@@ -1379,6 +1381,9 @@ trainer:
     sharding: full_shard
 rollout:
   backend: vllm
+  vllm:
+    engine_kwargs:
+      enable_sleep_mode: true
   partial_rollout:
     enabled: true
     pause_mode: keep
@@ -1436,8 +1441,8 @@ control:
 - `rollout.backend` 允许 `vllm`、`huggingface` 或 `mock`；`huggingface` backend 必须通过 `rollout.huggingface` 表达 Transformers loader/generation 参数，不复用 `rollout.vllm.sampling_params`；
 - `weight_transfer.method=locality_aware_checkpoint` 且存在 rollout-only GPU 时，`allow_rollout_only_artifact_pull` 必须为 true；
 - `runtime.ray.gpu_manager.hybrid_toggle.offload.trainer_model` 与 `trainer_optimizer` 必须显式配置为 CPU residency，v0.1 推荐 `cpu_pinned`；
-- `hybrid_toggle.offload.rollout_engine=vllm_sleep` 时必须配置 `vllm_sleep_level`；若 backend 不支持 sleep/offload，resolved config 必须降级为 `teardown_and_reload` 并在 dry-run 中给出启动成本提示；
-- `hybrid_toggle.offload.residual_gpu_memory_budget_mb` 用于 offload 后的显存余量检查，允许保留 CUDA context/NCCL bookkeeping，但不得掩盖 model/optimizer/KV cache 未释放；
+- `hybrid_toggle.offload.rollout_engine=vllm_sleep` 时必须配置 `vllm_sleep_level`，并强制 vLLM engine 以 `enable_sleep_mode=true` 构造；该路径保留 engine 对象，若 backend 不支持 sleep/offload 必须 fail-fast，不能静默降级为 `teardown_and_reload`；
+- `hybrid_toggle.offload.residual_gpu_memory_budget_mb` 用于 offload 后的显存余量检查，允许保留 CUDA context/NCCL bookkeeping，但不得掩盖 model weights、optimizer state 或 KV cache 未释放；超过预算时必须阻止 trainer window 启动；
 - `rollout.partial_rollout.enabled=true` 时必须使用 `pause_mode=keep` 和 `clear_cache=true`，并要求 `SampleRecord` 输出 `policy_segments` 与 token-level old logprobs；
 - `trainer.fsdp2` 的 world size 必须与 `parallel.trainer.fsdp_world_size`、`runtime.ray.placement.trainer.num_ranks` 一致；
 - `rollout.tensor_parallel_size` 必须与 `parallel.rollout.tensor_parallel_size`、`runtime.ray.placement.rollout.tensor_parallel_size` 一致；

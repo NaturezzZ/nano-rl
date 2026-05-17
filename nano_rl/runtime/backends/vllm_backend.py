@@ -75,6 +75,19 @@ class VllmBackendConfig(BaseModel):
     set_cuda_visible_devices: bool = True
     offload_strategy: Literal["vllm_sleep", "teardown_and_reload"] = "vllm_sleep"
     vllm_sleep_level: Literal[1, 2] = 2
+    residual_gpu_memory_budget_mb: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_sleep_mode_kwargs(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        if values.get("offload_strategy", "vllm_sleep") == "vllm_sleep":
+            engine_kwargs = dict(values.get("engine_kwargs") or {})
+            engine_kwargs["enable_sleep_mode"] = True
+            values["engine_kwargs"] = engine_kwargs
+        return values
 
     @model_validator(mode="after")
     def _validate_gpu_binding(self) -> "VllmBackendConfig":
@@ -267,14 +280,16 @@ class VllmRolloutBackend:
         if self.config.offload_strategy == "vllm_sleep":
             slept = _call_engine_sleep(self._engine, level=self.config.vllm_sleep_level)
             if not slept:
-                logger.warning("vLLM engine does not expose sleep/offload; tearing down engine for CPU standby")
-                self._engine = None
-                action = "teardown_missing_sleep"
+                raise VllmBackendError(
+                    "vLLM engine does not expose sleep/offload; cannot keep engine resident for vllm_sleep"
+                )
         else:
             self._engine = None
             action = "teardown"
         self._offloaded = True
-        state = self._residency_state("offloaded", action=action)
+        memory_snapshot = _visible_gpu_memory_snapshot_mb(self.config)
+        state = self._residency_state("offloaded", action=action, gpu_memory=memory_snapshot)
+        _assert_residual_gpu_memory_budget(self.config, memory_snapshot)
         logger.info(
             "vLLM offload completed: active_version=%s action=%s",
             state["active_weight_version"],
@@ -326,7 +341,14 @@ class VllmRolloutBackend:
             raise VllmBackendError("vLLM engine has not been initialized")
         return self._engine
 
-    def _residency_state(self, residency: str, *, action: str) -> dict[str, Any]:
+    def _residency_state(
+        self,
+        residency: str,
+        *,
+        action: str,
+        gpu_memory: Sequence[Mapping[str, int | None]] = (),
+    ) -> dict[str, Any]:
+        residual_gpu_memory_mb = max((int(item["used_mb"]) for item in gpu_memory), default=None)
         return {
             "backend": "vllm",
             "residency": residency,
@@ -335,6 +357,8 @@ class VllmRolloutBackend:
             "has_engine": self._engine is not None,
             "offloaded": self._offloaded,
             "gpu_ids": list(self.config.gpu_ids),
+            "residual_gpu_memory_mb": residual_gpu_memory_mb,
+            "gpu_memory": [dict(item) for item in gpu_memory],
         }
 
     def _assert_rollout_lease(self, lease: GpuLease | Sequence[GpuLease]) -> None:
@@ -443,18 +467,26 @@ def _default_engine_factory(config: VllmBackendConfig, _meta: WeightMeta) -> Any
     except ImportError as exc:
         raise VllmBackendUnavailable(package_name="vllm", action="construct rollout backend", original_error=exc) from exc
 
+    engine_kwargs = _engine_kwargs_for_config(config)
     kwargs: dict[str, Any] = {
         "model": config.model_path,
         "tokenizer": config.tokenizer_path or config.model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
         "trust_remote_code": config.trust_remote_code,
-        **config.engine_kwargs,
+        **engine_kwargs,
     }
     if config.dtype is not None:
         kwargs["dtype"] = config.dtype
     if config.max_model_len is not None:
         kwargs["max_model_len"] = config.max_model_len
     return vllm.LLM(**kwargs)
+
+
+def _engine_kwargs_for_config(config: VllmBackendConfig) -> dict[str, Any]:
+    engine_kwargs = dict(config.engine_kwargs)
+    if config.offload_strategy == "vllm_sleep":
+        engine_kwargs["enable_sleep_mode"] = True
+    return engine_kwargs
 
 
 def _call_engine_sleep(engine: Any, *, level: int) -> bool:
@@ -473,6 +505,70 @@ def _call_engine_sleep(engine: Any, *, level: int) -> bool:
             except TypeError:
                 continue
     return False
+
+
+def _visible_gpu_memory_snapshot_mb(config: VllmBackendConfig) -> tuple[dict[str, int | None], ...]:
+    try:
+        torch = importlib.import_module("torch")
+    except ImportError:
+        return ()
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not cuda.is_available():
+        return ()
+    try:
+        device_count = cuda.device_count()
+    except Exception as exc:  # pragma: no cover - defensive around CUDA runtime state
+        logger.debug("could not inspect CUDA device count after vLLM sleep: %s", exc)
+        return ()
+
+    snapshot: list[dict[str, int | None]] = []
+    for local_device in range(device_count):
+        try:
+            free_bytes, total_bytes = cuda.mem_get_info(local_device)
+        except TypeError:
+            try:
+                with cuda.device(local_device):
+                    free_bytes, total_bytes = cuda.mem_get_info()
+            except Exception as exc:  # pragma: no cover - defensive around CUDA runtime state
+                logger.debug("could not inspect CUDA memory for local device %s: %s", local_device, exc)
+                continue
+        except Exception as exc:  # pragma: no cover - defensive around CUDA runtime state
+            logger.debug("could not inspect CUDA memory for local device %s: %s", local_device, exc)
+            continue
+
+        gpu_id = config.gpu_ids[local_device] if local_device < len(config.gpu_ids) else None
+        total_mb = int(total_bytes // (1024 * 1024))
+        free_mb = int(free_bytes // (1024 * 1024))
+        snapshot.append(
+            {
+                "local_device": local_device,
+                "gpu_id": gpu_id,
+                "used_mb": total_mb - free_mb,
+                "free_mb": free_mb,
+                "total_mb": total_mb,
+            }
+        )
+    return tuple(snapshot)
+
+
+def _assert_residual_gpu_memory_budget(
+    config: VllmBackendConfig,
+    snapshot: Sequence[Mapping[str, int | None]],
+) -> None:
+    if config.residual_gpu_memory_budget_mb is None or not snapshot:
+        return
+    budget = config.residual_gpu_memory_budget_mb
+    excess = [item for item in snapshot if int(item["used_mb"]) > budget]
+    if not excess:
+        return
+    details = ", ".join(
+        f"gpu={item.get('gpu_id')} local_device={item['local_device']} used={item['used_mb']}MB"
+        for item in excess
+    )
+    raise VllmBackendError(
+        f"vLLM sleep left residual GPU memory above budget {budget}MB: {details}; "
+        "weights and KV cache must be released before trainer execution"
+    )
 
 
 def _call_engine_wake(engine: Any) -> bool:

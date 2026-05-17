@@ -76,7 +76,6 @@ class RayTrainingLoop:
             total_required=batch_size * max_steps,
         )
 
-        self._initialize_trainers()
         initial_weight = self._bootstrap_initial_weight()
         current_weight = initial_weight
         steps: list[dict[str, object]] = []
@@ -149,6 +148,14 @@ class RayTrainingLoop:
             rank.rank: state
             for rank, state in zip(self.launch_config.gpu_plan.trainer_ranks, states, strict=True)
         }
+
+    def _ensure_trainers_initialized(self) -> None:
+        if all(
+            self._trainer_states.get(rank.rank) is not None
+            for rank in self.launch_config.gpu_plan.trainer_ranks
+        ):
+            return
+        self._initialize_trainers()
 
     def _bootstrap_initial_weight(self) -> dict[str, object]:
         active = self._call("weight-registry", "latest_active_global")
@@ -245,12 +252,17 @@ class RayTrainingLoop:
                 rank.rank: self._trainer_lease(rank)
                 for rank in self.launch_config.gpu_plan.trainer_ranks
             }
+            self._ensure_trainers_initialized()
             self._hydrate_trainers(trainer_leases)
             try:
                 train_stats = self._optimize_trainers(batch, trainer_leases)
-                exported = self._call("trainer-rank-0", "export_weight", current_weight)
+                exported = self._export_weight_from_trainers(current_weight)
                 registered = self._call("weight-registry", "register", exported)
-            finally:
+            except Exception:
+                self._offload_trainers_best_effort(trainer_leases)
+                trainers_offloaded = True
+                raise
+            else:
                 self._offload_trainers(trainer_leases)
                 trainers_offloaded = True
             self._call("sample-queue", "ack_batch", batch["train_batch_id"])
@@ -291,6 +303,23 @@ class RayTrainingLoop:
             for rank in self.launch_config.gpu_plan.trainer_ranks
         ]
         return self._get(refs)
+
+    def _export_weight_from_trainers(self, current_weight: dict[str, object]) -> dict[str, object]:
+        refs: list[object] = []
+        ranks: list[int] = []
+        for rank in self.launch_config.gpu_plan.trainer_ranks:
+            ranks.append(rank.rank)
+            refs.append(
+                self.handles[f"trainer-rank-{rank.rank}"].export_weight.remote(
+                    current_weight,
+                    rank.rank == 0,
+                )
+            )
+        exports = self._get(refs)
+        for rank, exported in zip(ranks, exports, strict=True):
+            if rank == 0:
+                return exported
+        raise RuntimeError("trainer rank 0 is required to publish exported weights")
 
     def _offload_trainers(self, leases: dict[int, dict[str, object]]) -> None:
         refs = [

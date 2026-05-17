@@ -114,6 +114,7 @@ class FakeTensor:
     def __init__(self, value: Any = None):
         self.value = value
         self.devices: list[Any] = []
+        self.detach_calls = 0
 
     def to(self, device: Any) -> "FakeTensor":
         self.devices.append(device)
@@ -121,6 +122,14 @@ class FakeTensor:
 
     def clone(self) -> "FakeTensor":
         return FakeTensor(self.value)
+
+    def detach(self) -> "FakeTensor":
+        self.detach_calls += 1
+        return self
+
+    def cpu(self) -> "FakeTensor":
+        self.devices.append("cpu")
+        return self
 
 
 class FakeLoss:
@@ -146,6 +155,7 @@ class FakeModel:
         self.to_devices: list[Any] = []
         self.forward_calls: list[dict[str, Any]] = []
         self.saved_dirs: list[Path] = []
+        self.saved_state_dicts: list[dict[str, Any] | None] = []
         self.losses: list[FakeLoss] = []
 
     def to(self, device: Any) -> "FakeModel":
@@ -161,8 +171,9 @@ class FakeModel:
         self.forward_calls.append(kwargs)
         return SimpleNamespace(loss=loss)
 
-    def save_pretrained(self, output_dir: Path) -> None:
+    def save_pretrained(self, output_dir: Path, *, state_dict: dict[str, Any] | None = None) -> None:
         self.saved_dirs.append(Path(output_dir))
+        self.saved_state_dicts.append(state_dict)
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         Path(output_dir, "model.txt").write_text("fake model\n", encoding="utf-8")
 
@@ -203,6 +214,11 @@ class FakeAdamW:
         self.zero_grad_calls.append(kwargs)
 
 
+class FakeStateDictOptions:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
 class FakeRayObjectRef:
     def __init__(self, payload: Any) -> None:
         self.payload = payload
@@ -217,6 +233,7 @@ class FakeFsdp2Modules:
         self.empty_cache_calls = 0
         self.init_process_group_calls: list[dict[str, Any]] = []
         self.fully_shard_calls: list[FakeModel] = []
+        self.state_dict_calls: list[dict[str, Any]] = []
         self.ray_module = ray_module
 
         def is_available() -> bool:
@@ -250,6 +267,10 @@ class FakeFsdp2Modules:
             AutoModelForCausalLM=SimpleNamespace(from_pretrained=self._model_from_pretrained),
             AutoTokenizer=SimpleNamespace(from_pretrained=self._tokenizer_from_pretrained),
         )
+        self.checkpoint_state_dict = SimpleNamespace(
+            get_model_state_dict=self._get_model_state_dict,
+            StateDictOptions=FakeStateDictOptions,
+        )
 
     def _init_process_group(self, **kwargs: Any) -> None:
         self.init_process_group_calls.append(kwargs)
@@ -257,6 +278,10 @@ class FakeFsdp2Modules:
     def _fully_shard(self, model: FakeModel) -> None:
         self.fully_shard_calls.append(model)
         return None
+
+    def _get_model_state_dict(self, model: FakeModel, *, options: FakeStateDictOptions) -> dict[str, FakeTensor]:
+        self.state_dict_calls.append({"model": model, "options": options})
+        return {"model.layers.0.weight": FakeTensor("full-weight")}
 
     def _model_from_pretrained(self, model_path: str, **kwargs: Any) -> FakeModel:
         self.model.from_pretrained = {"model_path": model_path, **kwargs}
@@ -279,6 +304,7 @@ def _install_fake_fsdp2_modules(
     by_name = {
         "torch": modules.torch,
         "torch.distributed": modules.distributed,
+        "torch.distributed.checkpoint.state_dict": modules.checkpoint_state_dict,
         "torch.distributed._composable.fsdp": modules.fsdp,
         "transformers": modules.transformers,
     }
@@ -504,6 +530,64 @@ def test_fsdp2_backend_multi_rank_initializes_process_group_and_fully_shards(
         {"backend": "nccl", "init_method": "env://", "rank": 1, "world_size": 2}
     ]
     assert modules.fully_shard_calls == [modules.model]
+
+
+def test_fsdp2_backend_multi_rank_export_uses_full_state_dict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    modules = _install_fake_fsdp2_modules(monkeypatch)
+    backend = Fsdp2TrainerBackend(
+        TrainerBackendConfig(
+            backend="fsdp2",
+            rank=0,
+            world_size=2,
+            gpu_id=0,
+            group_epoch=0,
+            rendezvous="env://",
+            model_path="/fake/hf-model",
+            checkpoint_dir=str(tmp_path),
+        )
+    )
+
+    backend.initialize_rank()
+    exported = backend.export_weight(_weight(version_id=7))
+
+    assert exported.version_id == 8
+    assert modules.state_dict_calls
+    assert modules.state_dict_calls[0]["model"] is modules.model
+    assert modules.state_dict_calls[0]["options"].kwargs == {"full_state_dict": True, "cpu_offload": True}
+    assert modules.model.saved_state_dicts[0]["model.layers.0.weight"].value == "full-weight"
+    assert modules.model.saved_state_dicts[0]["model.layers.0.weight"].devices[-1] == "cpu"
+    assert (tmp_path / "version-8" / "model.txt").exists()
+
+
+def test_fsdp2_backend_non_publishing_rank_participates_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    modules = _install_fake_fsdp2_modules(monkeypatch)
+    backend = Fsdp2TrainerBackend(
+        TrainerBackendConfig(
+            backend="fsdp2",
+            rank=1,
+            world_size=2,
+            gpu_id=1,
+            group_epoch=0,
+            rendezvous="env://",
+            model_path="/fake/hf-model",
+            checkpoint_dir=str(tmp_path),
+        )
+    )
+
+    backend.initialize_rank()
+    participant = backend.export_weight(_weight(version_id=7), publish=False)
+
+    assert participant.version_id == 8
+    assert participant.created_by == "trainer-rank-1"
+    assert participant.checksum == "abc123"
+    assert modules.state_dict_calls
+    assert modules.model.saved_dirs == []
 
 
 def test_fsdp2_backend_requires_sample_record_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

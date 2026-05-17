@@ -67,6 +67,8 @@ def test_ray_launch_plan_uses_role_scoped_gpu_resources() -> None:
     assert rollout_backend_config["tensor_parallel_size"] == 2
     assert rollout_backend_config["gpu_ids"] == [4, 5]
     assert rollout_backend_config["holder_ids"] == ["rollout-dp-2-tp-0", "rollout-dp-2-tp-1"]
+    assert rollout_backend_config["engine_kwargs"]["enable_sleep_mode"] is True
+    assert rollout_backend_config["residual_gpu_memory_budget_mb"] == 2048
     trainer_rank = next(actor for actor in plan.actors if actor.name == "trainer-rank-0")
     assert trainer_rank.num_gpus == 0
     assert trainer_rank.resources == {"train_gpu_4": 1}

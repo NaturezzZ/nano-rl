@@ -224,8 +224,8 @@ class TrainerRankRole:
         if lease.holder_id != expected_holder:
             raise SlotStateError(f"trainer rank {self.rank} lease holder is {lease.holder_id}")
 
-    def export_weight(self, parent: WeightMeta) -> WeightMeta:
-        if self.rank != 0:
+    def export_weight(self, parent: WeightMeta, *, publish: bool = True) -> WeightMeta:
+        if self.rank != 0 and publish:
             raise RuntimeError("only rank 0 can export weights in the local smoke runtime")
         version_id = parent.version_id + 1
         checksum = sha256(f"{parent.checksum}:{version_id}:{self.train_step}".encode()).hexdigest()

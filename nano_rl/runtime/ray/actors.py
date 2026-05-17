@@ -532,17 +532,18 @@ def build_trainer_rank_actor_class():
             )
             return stats.model_dump(mode="json")
 
-        def export_weight(self, parent: dict[str, object]) -> dict[str, object]:
+        def export_weight(self, parent: dict[str, object], publish: bool = True) -> dict[str, object]:
             weight = WeightMeta.model_validate(parent)
             logger.info(
-                "TrainerRankActor export_weight started: rank=%s parent_version=%s",
+                "TrainerRankActor export_weight started: rank=%s parent_version=%s publish=%s",
                 self._role.rank,
                 weight.version_id,
+                publish,
             )
             if self._backend is not None:
-                exported = self._backend.export_weight(weight)
+                exported = self._backend.export_weight(weight, publish=publish)
             else:
-                exported = self._role.export_weight(weight)
+                exported = self._role.export_weight(weight, publish=publish)
             logger.info(
                 "TrainerRankActor export_weight completed: rank=%s version=%s",
                 self._role.rank,

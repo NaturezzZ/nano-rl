@@ -134,3 +134,8 @@ def test_mock_backend_rejects_non_rank0_export() -> None:
 
     with pytest.raises(BackendStateError, match="rank 1 cannot export"):
         backend.export_weight(_weight())
+
+    participant = backend.export_weight(_weight(), publish=False)
+
+    assert participant.version_id == 6
+    assert participant.created_by == "trainer-rank-1"
